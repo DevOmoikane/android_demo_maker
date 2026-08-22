@@ -1,0 +1,106 @@
+[
+  {
+    "action": "pm_clear",
+    "settle_ms": 1500
+  },
+  {
+    "action": "launch",
+    "settle_ms": 2500,
+    "narration": "We start from a clean install of the app."
+  },
+  {
+    "action": "tap_contains",
+    "text": "Get started",
+    "narration": "Signing up takes just a couple of fields."
+  },
+  {
+    "action": "tap_text",
+    "text": "Email",
+    "type": "demo-{{TIMESTAMP}}@example.com",
+    "settle_ms": 400,
+    "narration": "A unique throwaway address keeps repeat runs from colliding."
+  },
+  {
+    "action": "tap_xy",
+    "x": 540,
+    "y": 900,
+    "type": "s3cret-Pa55word",
+    "narration": "Then a password. Raw coordinates are a last resort for fields with no stable label, like password boxes.",
+    "settle_ms": 300
+  },
+  {
+    "action": "dismiss_keyboard"
+  },
+  {
+    "action": "swipe_up_from_contains",
+    "text": "Terms of Service",
+    "delta_y": 500,
+    "narration": "Scroll the form up so the sign-up button is reachable."
+  },
+  {
+    "action": "tap_contains",
+    "text": "Create account",
+    "settle_ms": 2000,
+    "narration": "And we're in."
+  },
+  {
+    "action": "assert_text",
+    "text": "Welcome",
+    "narration": "The dashboard confirms we're signed in."
+  },
+  {
+    "action": "tap_desc",
+    "desc": "Create note",
+    "narration": "Adding our first note."
+  },
+  {
+    "action": "pause",
+    "narration": "Notes sync instantly across devices."
+  },
+  {
+    "action": "back",
+    "narration": "Going back keeps everything saved."
+  },
+  {
+    "action": "home_button",
+    "narration": "Leaving the app is no problem at all."
+  },
+  {
+    "action": "reopen",
+    "narration": "Reopen it, and we land exactly where we left off."
+  },
+  {
+    "action": "exec",
+    "shell": "bash",
+    "command": "# Host-side scripting: anything a normal script can do\necho \"device: $DEMO_SERIAL\"\necho \"app: $DEMO_APP_ID\"\ndate -u +%Y-%m-%dT%H:%M:%SZ",
+    "on_fail": "continue",
+    "narration": "The demo can also run commands on the machine driving it."
+  },
+  {
+    "action": "exec",
+    "shell": "lambda",
+    "command": "\"unix timestamp: \\(now | floor)\"",
+    "settle_ms": 300
+  },
+  {
+    "action": "if",
+    "source": "last_command",
+    "output_matches": "^unix timestamp: [0-9]+$",
+    "then": [
+      { "action": "pause", "narration": "The script checked its own output before carrying on." }
+    ],
+    "else": [
+      { "action": "pause", "narration": "Unexpected output, but the tour carries on regardless." }
+    ]
+  },
+  {
+    "action": "if",
+    "source": "screen",
+    "text": "Welcome",
+    "matches": "^Welcome back",
+    "timeout_seconds": 6,
+    "then": [
+      { "action": "tap_desc", "desc": "Profile", "narration": "Straight back to the profile." }
+    ]
+  }
+]

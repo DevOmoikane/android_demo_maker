@@ -1,0 +1,19 @@
+# Recorded demos and run artifacts
+output/
+*.tmp
+
+# Downloaded Piper voice models (large; get them from
+# huggingface.co/rhasspy/piper-voices or let setup.sh fetch one)
+piper-voices/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local scratch / smoke-test steps files
+.smoke-*.json
+
+# Editor and OS noise
+.DS_Store
+.history/

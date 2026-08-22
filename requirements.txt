@@ -1,0 +1,4 @@
+# Demo Maker Web Studio dependencies.
+# Intentionally empty: the app runs on the Python standard library only.
+# If a third-party package is ever needed, pin it here, e.g.:
+#   somepackage==1.2.3

@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Maker Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">&#9654;</span> Demo Maker Studio
+    <span id="version-badge" class="badge subtle"></span>
+  </div>
+  <div class="statusbar">
+    <span id="device-chip" class="badge">no device</span>
+    <span id="run-chip" class="badge subtle">idle</span>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button data-tab="app" class="tab active">App</button>
+  <button data-tab="narration" class="tab">Narration</button>
+  <button data-tab="steps" class="tab">Steps</button>
+  <button data-tab="spec" class="tab">Spec Tests</button>
+  <button data-tab="output" class="tab">Output &amp; Advanced</button>
+  <button data-tab="run" class="tab">Run</button>
+</nav>
+
+<main>
+
+<!-- ============ APP TAB ============ -->
+<section id="tab-app" class="panel active">
+  <div class="card">
+    <h2>Device</h2>
+    <div class="row">
+      <select id="device-select"></select>
+      <button id="device-refresh" class="ghost">Refresh</button>
+    </div>
+    <p class="hint" id="adb-hint"></p>
+  </div>
+
+  <div class="card">
+    <h2>Application</h2>
+    <div class="row">
+      <label class="inline"><input type="radio" name="scope" value="user"> user apps</label>
+      <label class="inline"><input type="radio" name="scope" value="all"> all packages</label>
+      <input id="app-filter" type="search" placeholder="filter package list (clear to see all)">
+    </div>
+    <div class="row">
+      <div class="app-input-wrap">
+        <input id="app-input" placeholder="com.example.app"
+               autocomplete="off" spellcheck="false">
+        <ul id="app-suggestions" class="suggest" hidden></ul>
+      </div>
+      <button id="app-resolve" class="ghost">Resolve activity</button>
+    </div>
+    <div class="row">
+      <input id="activity-input" placeholder="launch activity (auto)">
+    </div>
+    <p class="hint" id="apps-hint"></p>
+  </div>
+</section>
+
+<!-- ============ NARRATION TAB ============ -->
+<section id="tab-narration" class="panel">
+  <div class="card">
+    <h2>Engine</h2>
+    <div class="row" id="engine-radios">
+      <label class="inline"><input type="radio" name="engine" value="piper"> Piper (neural)</label>
+      <label class="inline"><input type="radio" name="engine" value="say"> macOS say</label>
+      <label class="inline"><input type="radio" name="engine" value="none"> none (silent video)</label>
+    </div>
+    <p class="hint" id="engine-hint"></p>
+  </div>
+
+  <div class="card" id="say-card">
+    <h2>Voice</h2>
+    <div class="row">
+      <input id="voice-filter" type="search" placeholder="filter voices or locales...">
+    </div>
+    <div class="row">
+      <select id="voice-select" size="10"></select>
+    </div>
+    <div class="row">
+      <label class="inline">rate <input id="rate-input" type="number" min="80" max="360" step="5"> wpm</label>
+      <input id="rate-slider" type="range" min="80" max="360" step="5">
+    </div>
+  </div>
+
+  <div class="card" id="piper-card">
+    <h2>Piper voice model</h2>
+    <div class="row">
+      <select id="piper-model-select"></select>
+    </div>
+    <div class="row">
+      <input id="piper-model-path" placeholder="or absolute path to a .onnx model">
+    </div>
+    <div class="row">
+      <input id="piper-bin" placeholder="piper binary path (auto-detected)">
+    </div>
+    <p class="hint" id="piper-hint"></p>
+  </div>
+
+  <div class="card">
+    <h2>Preview</h2>
+    <div class="row">
+      <input id="preview-text" placeholder="sample text (blank uses the default phrase)">
+      <button id="preview-play" class="primary">Play sample</button>
+    </div>
+    <audio id="preview-audio" controls></audio>
+    <p class="hint" id="preview-hint"></p>
+  </div>
+</section>
+
+<!-- ============ STEPS TAB ============ -->
+<section id="tab-steps" class="panel">
+  <div class="toolbar">
+    <span id="steps-file" class="mono small"></span>
+    <input id="scenario-name" class="mono small" hidden
+           placeholder="scenario name">
+    <span class="spacer"></span>
+    <select id="recents-select"><option value="">recent...</option></select>
+    <button id="steps-open" class="ghost">Open...</button>
+    <button id="steps-save" class="ghost">Save</button>
+    <button id="steps-validate" class="ghost">Validate</button>
+    <button id="steps-dryrun" class="ghost" title="drive the steps without recording">Dry run</button>
+    <button id="steps-run" class="primary" title="record these steps now">Run</button>
+    <span id="dirty-flag" class="badge warn" hidden>unsaved</span>
+  </div>
+  <div id="validation-banner" class="banner error" hidden></div>
+  <div class="toolbar">
+    <select id="add-action-select"></select>
+    <button id="add-step-top" class="primary">+ Add step</button>
+  </div>
+  <ol id="steps-tree" class="tree-root"></ol>
+</section>
+
+<!-- ============ SPEC TESTS TAB ============ -->
+<section id="tab-spec" class="panel">
+  <div class="card">
+    <h2>Target</h2>
+    <div class="row">
+      <input id="spec-dir" placeholder="scenarios directory (files: *.json)">
+      <button id="spec-dir-browse" class="ghost">Browse...</button>
+      <button id="spec-refresh" class="ghost">Reload</button>
+    </div>
+    <div class="row">
+      <input id="spec-app-id" placeholder="app id under test, e.g. com.example.app">
+      <input id="spec-activity" placeholder="launch activity (auto)">
+      <button id="spec-resolve" class="ghost">Resolve</button>
+    </div>
+    <p class="hint" id="spec-hint"></p>
+  </div>
+
+  <div class="card">
+    <h2>Scenarios</h2>
+    <div class="toolbar">
+      <span id="spec-totals" class="badge subtle mono small"></span>
+      <span class="spacer"></span>
+      <button id="spec-newfile" class="ghost" title="create a new scenarios file">New file...</button>
+      <button id="spec-run-all" class="primary big">Run all files</button>
+    </div>
+    <div id="spec-files"><p class="hint">loading...</p></div>
+  </div>
+
+  <div class="card grow">
+    <h2>Last run</h2>
+    <pre id="spec-command" class="command mono"># no spec run started yet</pre>
+    <div class="row">
+      <p class="hint" id="spec-result"></p>
+      <span class="spacer"></span>
+      <button id="spec-cancel" class="danger" disabled>Cancel</button>
+    </div>
+    <pre id="spec-log" class="console mono" hidden></pre>
+    <div id="spec-report"></div>
+  </div>
+</section>
+
+<!-- ============ OUTPUT TAB ============ -->
+<section id="tab-output" class="panel">
+  <div class="card">
+    <h2>Output</h2>
+    <div class="row">
+      <input id="out-dir" placeholder="output folder">
+      <button id="out-dir-browse" class="ghost">Browse...</button>
+    </div>
+    <div class="row">
+      <input id="out-name" placeholder="file name (default: android-demo-&lt;timestamp&gt;.mp4)">
+    </div>
+  </div>
+  <div class="card">
+    <h2>Recording</h2>
+    <div class="row">
+      <label class="inline">segment seconds
+        <input id="segment-seconds" type="number" min="10" max="600" step="10">
+      </label>
+    </div>
+    <div class="row">
+      <label class="inline"><input id="keep-workdir" type="checkbox"> keep temp workdir after the run</label>
+    </div>
+    <div class="row">
+      <label class="inline"><input id="no-narration-force" type="checkbox">
+        force silent recording even when an engine is selected</label>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Script</h2>
+    <div class="row">
+      <input id="script-path" placeholder="path to android-demo.sh">
+    </div>
+    <p class="hint" id="script-hint"></p>
+  </div>
+</section>
+
+<!-- ============ RUN TAB ============ -->
+<section id="tab-run" class="panel">
+  <div class="card">
+    <h2>Command</h2>
+    <pre id="command-preview" class="command mono"></pre>
+    <div class="row">
+      <button id="run-copy" class="ghost">Copy command</button>
+      <span class="spacer"></span>
+      <button id="run-dry" class="ghost" title="drive the UI without recording">Dry run</button>
+      <button id="run-start" class="primary big">Run demo</button>
+      <button id="run-cancel" class="danger" disabled>Cancel</button>
+    </div>
+  </div>
+  <div class="card grow">
+    <h2>Log</h2>
+    <pre id="run-log" class="console mono"></pre>
+    <p class="hint" id="result-line"></p>
+  </div>
+</section>
+
+</main>
+
+<!-- step editor dialog (body level: showModal must not sit inside a
+     display:none panel, or the page goes inert with no visible dialog) -->
+<dialog id="step-dialog">
+  <form method="dialog" id="step-form">
+    <h3 id="step-dialog-title">Edit step</h3>
+    <div id="step-fields"></div>
+    <menu class="dialog-menu">
+      <button type="button" id="step-delete" class="danger">Delete</button>
+      <span class="spacer"></span>
+      <button type="button" class="ghost" data-close>Cancel</button>
+      <button type="submit" id="step-apply" class="primary">Apply</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- file/folder picker dialog -->
+<dialog id="picker-dialog">
+  <h3 id="picker-title">Choose file</h3>
+  <div class="row mono small" id="picker-crumbs"></div>
+  <ul id="picker-list" class="picker-list"></ul>
+  <div class="row">
+    <input id="picker-manual" placeholder="type a path and press Enter">
+  </div>
+  <menu class="dialog-menu">
+    <button type="button" class="ghost" data-close>Cancel</button>
+    <button type="button" id="picker-use" class="primary">Use this</button>
+  </menu>
+</dialog>
+
+<div id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

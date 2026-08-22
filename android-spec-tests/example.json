@@ -1,0 +1,18 @@
+[
+  {
+    "_note": "Example spec-test file. Copy or rename it, point the Spec Tests tab at your own directory, and replace these entries with scenarios for your app. Each runnable entry runs independently; entries without 'name' only feed the coverage report."
+  },
+  {
+    "name": "EXAMPLE-01: cold-launch works and UI dumping is healthy",
+    "steps": [
+      { "action": "launch", "settle_ms": 2000 },
+      { "action": "back", "settle_ms": 400 },
+      { "action": "assert_gone", "text": "__THIS_TEXT_SHOULD_NEVER_EXIST__" },
+      { "action": "home_button" }
+    ]
+  },
+  {
+    "_skipped": "EXAMPLE-02: a scenario you have not automated yet",
+    "_why": "Placeholder showing how coverage accounting works; never executed."
+  }
+]
