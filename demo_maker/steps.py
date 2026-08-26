@@ -68,6 +68,28 @@ ACTIONS: Dict[str, dict] = {
         _f("delta_y", "int", False, 500, help_text="swipe distance in px"),
         _f("nth", "int", False, 1),
     ]},
+    "swipe_element": {"label": "Swipe from an element", "fields": [
+        _f("text", "text", True,
+           help_text="substring anchor; the swipe starts at this element's "
+                     "center so it lands inside the right container"),
+        _f("direction", "select", False, "up",
+           ["up", "down", "left", "right"]),
+        _f("delta", "int", False, 500, help_text="swipe distance in px"),
+        _f("nth", "int", False, 1),
+    ]},
+    "drag_and_drop": {"label": "Drag element onto a target", "fields": [
+        _f("from_text", "text", True,
+           help_text="substring locating the dragged element"),
+        _f("from_nth", "int", False, 1),
+        _f("to_text", "text", False,
+           help_text="drop target: substring of its text"),
+        _f("to_desc", "text", False,
+           help_text="or drop target: exact content-desc"),
+        _f("x", "int", False, help_text="or raw drop coordinates; needs y too"),
+        _f("y", "int", False),
+        _f("to_nth", "int", False, 1),
+        _f("duration_ms", "int", False, 800, help_text="drag length in ms"),
+    ]},
     "swipe_until_contains": {"label": "Scroll until text visible", "fields": [
         _f("text", "text", True),
         _f("max_swipes", "int", False, 6),
@@ -77,12 +99,34 @@ ACTIONS: Dict[str, dict] = {
         _f("x", "int", True), _f("y", "int", True),
         _f("type", "text", False),
     ]},
+    "long_press": {"label": "Long press (hold)", "fields": [
+        _f("text", "text", False, help_text="exact uiautomator text to press"),
+        _f("contains", "text", False,
+           help_text="substring of the text to press (used when text is absent)"),
+        _f("desc", "text", False, help_text="exact content-desc to press"),
+        _f("x", "int", False, help_text="raw coordinate press; needs y too"),
+        _f("y", "int", False),
+        _f("nth", "int", False, 1),
+        _f("duration_ms", "int", False, 1000,
+           help_text="hold length; keep >= ~600 so the hold clears the "
+                     "~500ms long-click timeout"),
+    ]},
+    "double_tap": {"label": "Double tap", "fields": [
+        _f("text", "text", False, help_text="exact uiautomator text to tap"),
+        _f("contains", "text", False,
+           help_text="substring of the text to tap (used when text is absent)"),
+        _f("desc", "text", False, help_text="exact content-desc to tap"),
+        _f("x", "int", False, help_text="raw coordinate tap; needs y too"),
+        _f("y", "int", False),
+        _f("nth", "int", False, 1),
+    ]},
     "back": {"label": "Back button", "fields": []},
     "home_button": {"label": "Home button", "fields": []},
     "dismiss_keyboard": {"label": "Dismiss keyboard", "fields": []},
     "pause": {"label": "Pause (narration provides dwell)", "fields": []},
-    "swipe": {"label": "Swipe screen center up/down", "fields": [
-        _f("direction", "select", True, "up", ["up", "down"]),
+    "swipe": {"label": "Swipe screen center (any direction)", "fields": [
+        _f("direction", "select", True, "up", ["up", "down", "left", "right"]),
+        _f("duration_ms", "int", False, 400, help_text="gesture speed in ms"),
     ]},
     "assert_text": {"label": "Assert text appears (guards progress)",
                     "fields": [
@@ -125,6 +169,56 @@ _INT_RE = re.compile(r"^-?\d+$")
 # runs never speak).
 for _action in ACTIONS.values():
     _action["fields"].extend(_NARRATION)
+
+
+def _given(value) -> bool:
+    """A field the user actually filled in (None and blank both mean no)."""
+    return value is not None and str(value).strip() != ""
+
+
+def _xy_state(step) -> str:
+    """"both", "half", or "none": how completely x/y are filled in."""
+    has_x, has_y = _given(step.get("x")), _given(step.get("y"))
+    if has_x and has_y:
+        return "both"
+    if has_x or has_y:
+        return "half"
+    return "none"
+
+
+def _require_xy_pair(step, path, errors) -> bool:
+    if _xy_state(step) == "half":
+        errors.append({"path": path,
+                       "message": "'x' and 'y' must be given together"})
+        return False
+    return True
+
+
+def _validate_gesture_locator(step, action, path, errors):
+    anchors = [f for f in ("text", "contains", "desc")
+               if _given(step.get(f))]
+    has_point = _require_xy_pair(step, path, errors) \
+        and _xy_state(step) == "both"
+    if not anchors and not has_point:
+        errors.append({"path": path,
+                       "message": "%s needs 'text', 'contains', 'desc', "
+                                  "or 'x'+'y'" % action})
+
+
+def _validate_drop_target(step, path, errors):
+    if not _require_xy_pair(step, path, errors):
+        return
+    targets = [f for f in ("to_text", "to_desc") if _given(step.get(f))]
+    if _xy_state(step) == "both":
+        targets.append("x+y")
+    if len(targets) > 1:
+        errors.append({"path": path,
+                       "message": "give only one of 'to_text', 'to_desc', "
+                                  "or 'x'+'y'"})
+    elif not targets:
+        errors.append({"path": path,
+                       "message": "drag_and_drop needs a drop target: "
+                                  "'to_text', 'to_desc', or 'x'+'y'"})
 
 
 class StepError(Exception):
@@ -189,6 +283,14 @@ def _validate_step(step, path, errors, registry):
     if action == "exec" and isinstance(step.get("command"), str) \
             and step.get("shell") == "sh":
         pass  # sh accepts anything bash does for our purposes
+
+    if action in ("long_press", "double_tap"):
+        _validate_gesture_locator(step, action, path, errors)
+
+    if action == "drag_and_drop":
+        # from_text is a required field; the generic loop above already
+        # reports it missing. This check covers the drop-target half.
+        _validate_drop_target(step, path, errors)
 
     if action == "if":
         source = str(step.get("source") or "last_command")

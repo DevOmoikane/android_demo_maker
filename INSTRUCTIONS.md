@@ -61,9 +61,13 @@ recorded and each step's `narration` text is spoken over it.
    the device, then either type the package id or filter the package list and
    click **Resolve activity** so the launcher activity is filled in.
 2. **Narration tab**: choose an engine; Piper is the default (offline neural
-   voices). On macOS `say` offers system voices with a rate slider and
-   instant previews. Piper needs a `.onnx` model
-   (see `piper-voices/`). Choose *none* for a silent video.
+   voices). The Piper card lists every voice the studio found locally and,
+   under *Downloadable voices*, the full HuggingFace catalog: filter or
+   scroll, click **Download**, and the model lands in `piper-voices/` and
+   appears in the picker when it finishes (progress shown inline; the list
+   is cached for a day, **Refresh** re-fetches it). On macOS `say` offers
+   system voices with a rate slider and instant previews. Choose *none*
+   for a silent video.
 3. **Steps tab**: open or compose your steps file (format below). The editor
    validates as you go; red highlights mean fix-before-run. **Validate**
    checks the whole file and reports issues both inline and as a banner;
@@ -106,6 +110,9 @@ typed after the tap), `tap_contains`, `tap_contains_optional` (never fails),
 `tap_desc`, `tap_left_of_contains`, `swipe_up_from_contains`,
 `swipe_until_contains`, `tap_xy` (last resort), `back`, `home_button`,
 `dismiss_keyboard`, `pause`, `swipe`, `assert_text`, `exec`, and `if`.
+Gestures: `long_press`, `double_tap`, `swipe_element`, and
+`drag_and_drop` (see the [reference](#action-reference)); plain `swipe`
+covers up/down/left/right.
 See the [reference](#action-reference) for every field.
 
 Two dynamic values work anywhere text is typed or compared:
@@ -243,11 +250,15 @@ index (default 1).
 | `tap_desc` | `desc` (required), `nth` |
 | `tap_left_of_contains` | `text` (required), `offset_x` 59, `nth`; for unlabeled checkboxes left of a label |
 | `swipe_up_from_contains` | `text` (required), `delta_y` 500, `nth`; scrolls a clipped container from a label's own position |
+| `swipe_element` | `text` (required substring), `direction` up/down/left/right, `delta` 500 px, `nth`; swipes from the element's own center, so it lands inside the right pager/carousel even when the layout shifts |
+| `drag_and_drop` | `from_text` (required), `from_nth`; drop target: exactly one of `to_text`, `to_desc`, or `x`+`y` (`to_nth` for text/desc targets); `duration_ms` 800 |
+| `long_press` | one locator: `text` (exact) or `contains` (substring) or `desc`, or `x`+`y`; plus `nth`, `duration_ms` 1000 (keep >= ~600 to clear the long-click timeout) |
+| `double_tap` | same locators as `long_press` (no duration); both taps fire inside one on-device shell so they land within the double-tap window |
 | `swipe_until_contains` | `text` (required), `max_swipes` 6, `nth`; scroll-to-find-and-tap for feeds |
 | `tap_xy` | `x`, `y` (required), `type` |
 | `back`, `home_button`, `dismiss_keyboard` | none |
 | `pause` | none (dwell comes from narration/settle_ms) |
-| `swipe` | `direction`: up/down, screen-center swipe |
+| `swipe` | `direction`: up/down/left/right, screen-center swipe; optional `duration_ms` 400 |
 | `assert_text` | `text` (required), `nth`; exact text visible right now |
 | `exec` | `command` (required), `shell` bash/sh/lambda, `on_fail` stop/continue |
 | `if` | `source` last_command/screen plus the branch fields described above |

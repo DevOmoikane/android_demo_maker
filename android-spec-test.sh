@@ -54,6 +54,8 @@
 # exec step otherwise.
 #
 # Step actions: everything android-demo.sh supports (see its own --help),
+# including the gestures (long_press, double_tap, swipe_element, extended
+# swipe directions, drag_and_drop),
 # PLUS these assertions (all non-mutating, all fail the scenario if not met):
 #   assert_text            text     - exact text visible now (single dump, no poll)
 #   assert_text_eventually text, [max_attempts], [interval_seconds]
@@ -241,6 +243,68 @@ perform_action() {
     swipe_up_from_contains)
       find_and_swipe_up_from_contains "$(jq -r '.text' <<<"$step")" "$(jq -r '.delta_y // 500' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"
       ;;
+    swipe_element)
+      find_and_swipe_direction "$(jq -r '.text' <<<"$step")" "$(jq -r '.direction // "up"' <<<"$step")" "$(jq -r '.delta // 500' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"
+      ;;
+    long_press)
+      local lp_dur lp_text lp_contains lp_desc lp_x lp_y
+      lp_dur="$(jq -r '.duration_ms // 1000' <<<"$step")"
+      lp_text="$(jq -r '.text // empty' <<<"$step")"
+      lp_contains="$(jq -r '.contains // empty' <<<"$step")"
+      lp_desc="$(jq -r '.desc // empty' <<<"$step")"
+      if [ -n "$lp_text" ]; then
+        find_and_long_press text "$lp_text" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      elif [ -n "$lp_contains" ]; then
+        find_and_long_press contains "$lp_contains" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      elif [ -n "$lp_desc" ]; then
+        find_and_long_press desc "$lp_desc" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      else
+        lp_x="$(jq -r '.x // empty' <<<"$step")"; lp_y="$(jq -r '.y // empty' <<<"$step")"
+        if [ -n "$lp_x" ] && [ -n "$lp_y" ]; then
+          ADB shell input swipe "$lp_x" "$lp_y" "$lp_x" "$lp_y" "$lp_dur"
+        else
+          echo "ERROR: long_press needs 'text', 'contains', 'desc', or 'x'+'y'" >&2; return 1
+        fi
+      fi
+      ;;
+    double_tap)
+      local dt_text dt_contains dt_desc dt_x dt_y
+      dt_text="$(jq -r '.text // empty' <<<"$step")"
+      dt_contains="$(jq -r '.contains // empty' <<<"$step")"
+      dt_desc="$(jq -r '.desc // empty' <<<"$step")"
+      if [ -n "$dt_text" ]; then
+        find_and_double_tap text "$dt_text" "$(jq -r '.nth // 1' <<<"$step")"
+      elif [ -n "$dt_contains" ]; then
+        find_and_double_tap contains "$dt_contains" "$(jq -r '.nth // 1' <<<"$step")"
+      elif [ -n "$dt_desc" ]; then
+        find_and_double_tap desc "$dt_desc" "$(jq -r '.nth // 1' <<<"$step")"
+      else
+        dt_x="$(jq -r '.x // empty' <<<"$step")"; dt_y="$(jq -r '.y // empty' <<<"$step")"
+        if [ -n "$dt_x" ] && [ -n "$dt_y" ]; then
+          ADB shell "input tap $dt_x $dt_y && input tap $dt_x $dt_y"
+        else
+          echo "ERROR: double_tap needs 'text', 'contains', 'desc', or 'x'+'y'" >&2; return 1
+        fi
+      fi
+      ;;
+    drag_and_drop)
+      local dd_to_text dd_to_desc dd_x dd_y
+      dd_to_text="$(jq -r '.to_text // empty' <<<"$step")"
+      dd_to_desc="$(jq -r '.to_desc // empty' <<<"$step")"
+      dd_x="$(jq -r '.x // empty' <<<"$step")"; dd_y="$(jq -r '.y // empty' <<<"$step")"
+      if [ -n "$dd_to_text" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          contains "$dd_to_text" "$(jq -r '.to_nth // 1' <<<"$step")" "$(jq -r '.duration_ms // 800' <<<"$step")"
+      elif [ -n "$dd_to_desc" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          desc "$dd_to_desc" "$(jq -r '.to_nth // 1' <<<"$step")" "$(jq -r '.duration_ms // 800' <<<"$step")"
+      elif [ -n "$dd_x" ] && [ -n "$dd_y" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          point "$dd_x $dd_y" 1 "$(jq -r '.duration_ms // 800' <<<"$step")"
+      else
+        echo "ERROR: drag_and_drop needs a drop target: 'to_text', 'to_desc', or 'x'+'y'" >&2; return 1
+      fi
+      ;;
     swipe_until_contains)
       find_and_tap_after_scrolling "$(jq -r '.text' <<<"$step")" "$(jq -r '.max_swipes // 6' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"
       ;;
@@ -268,12 +332,17 @@ perform_action() {
       fi
       ;;
     swipe)
-      local dir cx y1 y2
+      local dir cx cy x1 x2 y1 y2 dur
       dir="$(jq -r '.direction' <<<"$step")"
-      cx=$(( SCREEN_W / 2 ))
-      if [ "$dir" = "up" ]; then y1=$(( SCREEN_H * 70 / 100 )); y2=$(( SCREEN_H * 30 / 100 ))
-      else y1=$(( SCREEN_H * 30 / 100 )); y2=$(( SCREEN_H * 70 / 100 )); fi
-      ADB shell input swipe "$cx" "$y1" "$cx" "$y2" 400
+      dur="$(jq -r '.duration_ms // 400' <<<"$step")"
+      cx=$(( SCREEN_W / 2 )); cy=$(( SCREEN_H / 2 ))
+      case "$dir" in
+        up)    ADB shell input swipe "$cx" $(( SCREEN_H * 70 / 100 )) "$cx" $(( SCREEN_H * 30 / 100 )) "$dur" ;;
+        down)  ADB shell input swipe "$cx" $(( SCREEN_H * 30 / 100 )) "$cx" $(( SCREEN_H * 70 / 100 )) "$dur" ;;
+        left)  ADB shell input swipe $(( SCREEN_W * 80 / 100 )) "$cy" $(( SCREEN_W * 20 / 100 )) "$cy" "$dur" ;;
+        right) ADB shell input swipe $(( SCREEN_W * 20 / 100 )) "$cy" $(( SCREEN_W * 80 / 100 )) "$cy" "$dur" ;;
+        *) echo "ERROR: invalid swipe direction '$dir' (expected up, down, left, or right)" >&2; return 1 ;;
+      esac
       ;;
     assert_text)
       local text; text="$(substitute_templates "$(jq -r '.text' <<<"$step")")" || return 1

@@ -262,7 +262,10 @@ def piper_model_urls(voice: str) -> List[str]:
     return [f"{HF_BASE}/{voice}.onnx", f"{HF_BASE}/{voice}.onnx.json"]
 
 
-def download_file(url: str, dest: Path, chunk_size: int = 1 << 20) -> None:
+def download_file(url: str, dest: Path, chunk_size: int = 1 << 20,
+                  progress=None) -> None:
+    """Stream url to dest (tmp file + rename). progress(got, total) replaces
+    the stdout percentage readout when provided."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     request = urllib.request.Request(url, headers={"User-Agent": "demo-maker-doctor"})
@@ -275,11 +278,14 @@ def download_file(url: str, dest: Path, chunk_size: int = 1 << 20) -> None:
                 break
             out.write(block)
             got += len(block)
-            if total:
+            if callable(progress):
+                progress(got, total)
+            elif total:
                 pct = min(got * 100 // total, 100)
                 sys.stdout.write(f"\r      {pct:3d}%  ({got >> 20} MB)")
                 sys.stdout.flush()
-    sys.stdout.write("\n")
+    if not callable(progress):
+        sys.stdout.write("\n")
     part.rename(dest)
 
 

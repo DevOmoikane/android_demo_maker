@@ -30,6 +30,7 @@ const State = {
   specDoc: [],
   specSchema: null,
   specOrder: [],
+  catalog: null,
 };
 
 /* Which document the Steps tree is currently editing:
@@ -137,6 +138,7 @@ async function boot() {
     await loadSchema();
     applyEngineVisibility();
     await loadVoices();
+    loadCatalog(false);
     await loadDevices();
     if (state.steps_exists) await loadSteps(State.settings.steps_path);
     fillOutputTab();
@@ -460,7 +462,136 @@ function bindNarrationTab(state) {
   $("#piper-bin").addEventListener("change", () =>
     saveSettings({piper_bin: $("#piper-bin").value.trim()}));
 
+  $("#catalog-filter").addEventListener("input", debounce(renderCatalog, 200));
+  $("#catalog-refresh").addEventListener("click", () => loadCatalog(true));
+
   $("#preview-play").addEventListener("click", playPreview);
+}
+
+/* ---------------- downloadable Piper voices ---------------- */
+
+async function loadCatalog(force) {
+  const hint = $("#catalog-hint");
+  try {
+    State.catalog = await api("/tts/catalog" + (force ? "?refresh=1" : ""));
+    renderCatalog();
+    if (force) {
+      toast(State.catalog.source === "network"
+        ? "voice list refreshed (" + State.catalog.voices.length + " voices)"
+        : "voice list from " + State.catalog.source +
+          " (network unreachable)", "ok");
+    }
+  } catch (err) {
+    hint.textContent = err.message;
+    hint.style.color = "var(--err)";
+  }
+  pollDownloadStatus();
+}
+
+function renderCatalog() {
+  const list = $("#catalog-list");
+  const hint = $("#catalog-hint");
+  hint.textContent = "";
+  list.innerHTML = "";
+  if (!State.catalog || !State.catalog.voices.length) return;
+  const needle = ($("#catalog-filter").value || "").trim().toLowerCase();
+  const voices = State.catalog.voices.filter((v) =>
+    !needle || (v.key + " " + v.locale).toLowerCase().includes(needle));
+  for (const voice of voices.slice(0, 400)) {
+    list.append(catalogRow(voice));
+  }
+  const shown = Math.min(voices.length, 400);
+  const source = State.catalog.source;
+  hint.style.color = "";
+  hint.textContent = shown + " of " + State.catalog.voices.length +
+    " voices" + (source !== "network"
+      ? "  (list from " + source + "; hit Refresh to retry the network)" : "");
+}
+
+function mb(bytes) {
+  return bytes ? Math.round(bytes / (1024 * 1024)) + " MB" : "size unknown";
+}
+
+function catalogRow(voice) {
+  const row = el("li", {class: "catalog-row", "data-key": voice.key});
+  row.append(el("span", {class: "name mono", text: voice.key}),
+             el("span", {class: "meta",
+                         text: voice.locale + " - " + voice.quality +
+                               " - " + mb(voice.size_bytes)}),
+             el("span", {class: "spacer"}));
+  row.append(catalogAction(voice));
+  return row;
+}
+
+function catalogAction(voice) {
+  if (voice.installed) {
+    return el("span", {class: "badge ok", text: "installed"});
+  }
+  const btn = el("button", {
+    class: "ghost small-btn",
+    text: "Download",
+    onclick: async () => {
+      try {
+        await api("/tts/download", {method: "POST", body: {key: voice.key}});
+        setCatalogRowText(voice.key, "starting...");
+        pollDownloadStatus();
+      } catch (err) {
+        toast(err.message, "error");
+      }
+    },
+  });
+  btn.dataset.download = voice.key;
+  return btn;
+}
+
+function setCatalogRowText(key, text) {
+  const row = $('.catalog-row[data-key="' + CSS.escape(key) + '"]');
+  if (!row) return;
+  let status = $(".status", row);
+  if (!status) {
+    status = el("span", {class: "status mono small"});
+    row.append(status);
+  }
+  status.textContent = text;
+}
+
+let downloadTimer = null;
+async function pollDownloadStatus() {
+  clearInterval(downloadTimer);
+  try {
+    const status = await api("/tts/download/status");
+    updateCatalogProgress(status);
+    if (status.running) {
+      downloadTimer = setInterval(async () => {
+        try {
+          updateCatalogProgress(await api("/tts/download/status"));
+        } catch (e) { /* transient */ }
+      }, 700);
+    }
+  } catch (e) { /* endpoint unavailable */ }
+}
+
+function updateCatalogProgress(status) {
+  $$("#catalog-list [data-download]").forEach((b) => { b.disabled = false; });
+  if (status.running && status.key) {
+    const pct = status.total
+      ? Math.round(status.got * 100 / status.total) + "%" : "";
+    const size = status.total
+      ? " (" + Math.round(status.got / (1024 * 1024)) + "/" +
+        Math.round(status.total / (1024 * 1024)) + " MB)" : "";
+    setCatalogRowText(status.key,
+                      "downloading " + (pct || "...") + size);
+    const btn = $('#catalog-list [data-download="' +
+                 CSS.escape(status.key) + '"]');
+    if (btn) btn.disabled = true;
+    return;
+  }
+  if (status.done || status.error) {
+    if (status.error) toast("download failed: " + status.error, "error");
+    else toast("voice downloaded; it is now in the model picker", "ok");
+    loadVoices();
+    loadCatalog(false);
+  }
 }
 
 function applyEngineVisibility() {
@@ -803,8 +934,9 @@ function errorsAt(path) {
 function stepSummary(step) {
   if (!step || typeof step !== "object") return "";
   const parts = [];
-  const interesting = ["text", "watch_for", "desc", "direction", "command",
-                       "x", "y", "source", "expect"];
+  const interesting = ["text", "watch_for", "desc", "contains", "direction",
+                       "delta", "from_text", "to_text", "to_desc",
+                       "duration_ms", "command", "x", "y", "source", "expect"];
   for (const key of interesting) {
     const value = step[key];
     if (value !== undefined && value !== "") parts.push(key + "=" + value);

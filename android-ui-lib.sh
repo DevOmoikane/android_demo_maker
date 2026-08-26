@@ -199,15 +199,103 @@ find_and_tap_left_of_contains() {
 # position, so the swipe still lands inside the scrollable area even if the
 # form's layout shifts.
 find_and_swipe_up_from_contains() {
-  local sub="$1" delta="$2" nth="${3:-1}" bounds nums x1 y1 x2 y2 cx cy
+  find_and_swipe_direction "$1" up "${2:-500}" "${3:-1}"
+}
+
+# find_and_swipe_direction <substring> <direction> <delta> [nth] - swipe
+# starting at a matched element's own center, moving delta pixels in
+# direction (up/down/left/right). Anchoring on the element instead of raw
+# screen coordinates keeps the gesture inside the right container (an inner
+# pager vs the outer feed, say) even if the layout shifts.
+find_and_swipe_direction() {
+  local sub="$1" dir="$2" delta="$3" nth="${4:-1}" bounds nums x1 y1 x2 y2 cx cy ex ey
+  case "$dir" in
+    up|down|left|right) ;;
+    *) echo "ERROR: invalid swipe_element direction '$dir' (expected up, down, left, or right)" >&2; return 2 ;;
+  esac
   bounds="$(poll_bounds _bounds_for_contains "$sub" "$nth")"
-  [ -n "$bounds" ] || { echo "ERROR: no element with text containing \"$sub\" (nth=$nth) found on screen" >&2; return 1; }
+  [ -n "$bounds" ] || { echo "ERROR: no element with text containing \"$sub\" (nth=$nth) found on screen to swipe from" >&2; return 1; }
   nums="$(printf '%s' "$bounds" | grep -o '[0-9]\+')"
   # shellcheck disable=SC2206
   local arr=($nums)
   x1="${arr[0]}"; y1="${arr[1]}"; x2="${arr[2]}"; y2="${arr[3]}"
   cx=$(( (x1 + x2) / 2 )); cy=$(( (y1 + y2) / 2 ))
-  ADB shell input swipe "$cx" "$cy" "$cx" $(( cy - delta )) 300
+  case "$dir" in
+    up)    ex="$cx";             ey=$(( cy - delta )) ;;
+    down)  ex="$cx";             ey=$(( cy + delta )) ;;
+    left)  ex=$(( cx - delta )); ey="$cy" ;;
+    right) ex=$(( cx + delta )); ey="$cy" ;;
+  esac
+  ADB shell input swipe "$cx" "$cy" "$ex" "$ey" 300
+}
+
+# find_and_long_press <mode> <value> [nth] [duration_ms] - press-and-hold on
+# an element located by mode: text (exact), contains (substring of text), or
+# desc (exact content-desc). input(1) has no dedicated long-press command; a
+# zero-distance swipe held longer than the framework's ~500ms long-click
+# timeout is how a press-and-hold is expressed over adb.
+find_and_long_press() {
+  local mode="$1" value="$2" nth="${3:-1}" dur="${4:-1000}" bounds cx cy
+  case "$mode" in
+    text)     bounds="$(poll_bounds _bounds_for_text "$value" "$nth")" ;;
+    contains) bounds="$(poll_bounds _bounds_for_contains "$value" "$nth")" ;;
+    desc)     bounds="$(poll_bounds _bounds_for_desc "$value" "$nth")" ;;
+  esac
+  [ -n "$bounds" ] || { echo "ERROR: no element found for long_press (${mode}=\"${value}\", nth=$nth)" >&2; return 1; }
+  read -r cx cy <<<"$(center_from_bounds "$bounds")"
+  ADB shell input swipe "$cx" "$cy" "$cx" "$cy" "$dur"
+}
+
+# find_and_double_tap <mode> <value> [nth] - double-taps an element located by
+# mode (text/contains/desc). Both taps are issued inside ONE on-device shell
+# command; two separate adb invocations would leave a gap between taps wider
+# than most apps' double-tap window.
+find_and_double_tap() {
+  local mode="$1" value="$2" nth="${3:-1}" bounds cx cy
+  case "$mode" in
+    text)     bounds="$(poll_bounds _bounds_for_text "$value" "$nth")" ;;
+    contains) bounds="$(poll_bounds _bounds_for_contains "$value" "$nth")" ;;
+    desc)     bounds="$(poll_bounds _bounds_for_desc "$value" "$nth")" ;;
+  esac
+  [ -n "$bounds" ] || { echo "ERROR: no element found for double_tap (${mode}=\"${value}\", nth=$nth)" >&2; return 1; }
+  read -r cx cy <<<"$(center_from_bounds "$bounds")"
+  ADB shell "input tap $cx $cy && input tap $cx $cy"
+}
+
+# find_and_drag <from-mode> <from-value> <from-nth> <to-mode> <to-value>
+#               <to-nth> [duration_ms]
+# Drags one element onto another: source located by from-mode (text/contains/
+# desc), drop target by to-mode (same three, or "point" with to-value "X Y"
+# for a raw coordinate drop zone like an unlabeled trash target).
+find_and_drag() {
+  local from_mode="$1" from_value="$2" from_nth="${3:-1}" \
+        to_mode="$4" to_value="$5" to_nth="${6:-1}" dur="${7:-800}"
+  local fbounds tbounds fx fy tx ty dnd_out dnd_ok=1
+  case "$from_mode" in
+    text)     fbounds="$(poll_bounds _bounds_for_text "$from_value" "$from_nth")" ;;
+    contains) fbounds="$(poll_bounds _bounds_for_contains "$from_value" "$from_nth")" ;;
+    desc)     fbounds="$(poll_bounds _bounds_for_desc "$from_value" "$from_nth")" ;;
+  esac
+  [ -n "$fbounds" ] || { echo "ERROR: no element found to drag (${from_mode}=\"${from_value}\", nth=$from_nth)" >&2; return 1; }
+  read -r fx fy <<<"$(center_from_bounds "$fbounds")"
+  case "$to_mode" in
+    text)     tbounds="$(poll_bounds _bounds_for_text "$to_value" "$to_nth")" ;;
+    contains) tbounds="$(poll_bounds _bounds_for_contains "$to_value" "$to_nth")" ;;
+    desc)     tbounds="$(poll_bounds _bounds_for_desc "$to_value" "$to_nth")" ;;
+    point)    tbounds="" ; tx="${to_value% *}"; ty="${to_value#* }" ;;
+  esac
+  if [ "$to_mode" != "point" ]; then
+    [ -n "$tbounds" ] || { echo "ERROR: no drop target found (${to_mode}=\"${to_value}\", nth=$to_nth)" >&2; return 1; }
+    read -r tx ty <<<"$(center_from_bounds "$tbounds")"
+  fi
+  # draganddrop (API 24+) sends real drag-start/drop events that some drag
+  # targets require to accept the drop; fall back to a slow swipe where the
+  # subcommand doesn't exist (older devices print a usage error).
+  dnd_out="$(ADB shell input draganddrop "$fx" "$fy" "$tx" "$ty" "$dur" 2>&1)" || dnd_ok=0
+  case "$dnd_out" in *usage:*|*Usage:*|*"unknown command"*) dnd_ok=0 ;; esac
+  if [ "$dnd_ok" = 0 ]; then
+    ADB shell input swipe "$fx" "$fy" "$tx" "$ty" "$dur"
+  fi
 }
 
 # find_and_tap_desc <exact content-desc> [nth]

@@ -53,8 +53,9 @@
 #   action        one of: launch, reopen, pm_clear, tap_text, tap_contains,
 #                 tap_contains_optional, tap_until_gone, tap_desc,
 #                 tap_left_of_contains, swipe_up_from_contains,
-#                 swipe_until_contains, tap_xy, back, home_button, pause,
-#                 swipe, dismiss_keyboard, assert_text, exec, if
+#                 swipe_element, swipe_until_contains, long_press,
+#                 double_tap, drag_and_drop, tap_xy, back, home_button,
+#                 pause, swipe, dismiss_keyboard, assert_text, exec, if
 #   text          exact (tap_text, assert_text) or substring
 #                 (tap_contains, tap_contains_optional, tap_left_of_contains,
 #                 swipe_up_from_contains) match against a uiautomator
@@ -75,6 +76,23 @@
 #                 form) so a lower field becomes tappable: dismiss_keyboard
 #                 alone can leave it clipped out of view with no error, so a
 #                 fixed coordinate tap on it can silently miss
+#   contains      long_press/double_tap locator: SUBSTRING of the text
+#                 attribute to press (checked only when "text" is absent)
+#   duration_ms   long_press/double_tap hold length and drag length in ms.
+#                 long_press default 1000 (keep >= ~600 so the hold clears
+#                 the framework's ~500ms long-click timeout); drag_and_drop
+#                 default 800. On `swipe` it is the gesture speed (default
+#                 400)
+#   delta         swipe_element only; pixels to swipe from the matched
+#                 element's center in `direction` (default: 500)
+#   direction     swipe_element/swipe: "up", "down", "left", or "right".
+#                 swipe_element starts at the matched text's own center;
+#                 plain `swipe` crosses the screen center (default: up)
+#   from_text     drag_and_drop only; substring locating the dragged element
+#                 (required). from_nth is its 1-based match index
+#   to_text       drag_and_drop drop target: substring of the target's text.
+#                 Exactly one of to_text / to_desc / x+y is required
+#   to_desc       drag_and_drop drop target: exact content-desc instead
 #   watch_for     tap_until_gone only; exact text whose presence means we
 #                 haven't moved on yet; required for that action
 #   max_attempts  tap_until_gone only; how many tap+wait cycles before giving
@@ -96,7 +114,6 @@
 #                 runs don't collide on a unique-email-style field) and
 #                 {{ENV:NAME}} (the environment variable NAME, auto-loaded
 #                 from .env next to the steps file if present, see above)
-#   direction     "up" or "down"; required for swipe
 #   max_swipes    swipe_until_contains only; cap on how many times to swipe
 #                 up looking for the text before giving up (default: 6)
 #   settle_ms     how long (ms) to let the UI animate/settle after the action
@@ -158,6 +175,14 @@
 # (polling ~20s through slow loads), e.g. insert one after a login step as a
 # signed-in guard. `exec` and `if` add host-side scripting and branching; see
 # their field docs above.
+#
+# Gestures: `long_press` and `double_tap` locate their target by exact
+# "text", "contains" (substring), or "desc", falling back to raw x+y
+# coordinates; `swipe_element` swipes from a matched element's center in any
+# direction (so the gesture stays inside the right pager/carousel even when
+# the layout shifts); `drag_and_drop` drags one element onto another (or
+# onto raw coordinates for unlabeled drop zones); plain `swipe` now covers
+# all four screen directions with an optional duration_ms.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -495,15 +520,103 @@ find_and_tap_left_of_contains() {
 # lower fields (e.g. a checkbox below the fold) clipped out of view with no
 # error; a tap at a fixed coordinate then silently misses.
 find_and_swipe_up_from_contains() {
-  local sub="$1" delta="$2" nth="${3:-1}" bounds nums x1 y1 x2 y2 cx cy
+  find_and_swipe_direction "$1" up "${2:-500}" "${3:-1}"
+}
+
+# find_and_swipe_direction <substring> <direction> <delta> [nth]: swipe
+# starting at a matched element's own center, moving delta pixels in
+# direction (up/down/left/right). Anchoring on the element instead of raw
+# screen coordinates keeps the gesture inside the right container (an inner
+# pager vs the outer feed, say) even if the layout shifts.
+find_and_swipe_direction() {
+  local sub="$1" dir="$2" delta="$3" nth="${4:-1}" bounds nums x1 y1 x2 y2 cx cy ex ey
+  case "$dir" in
+    up|down|left|right) ;;
+    *) echo "ERROR: invalid swipe_element direction '$dir' (expected up, down, left, or right)" >&2; return 2 ;;
+  esac
   bounds="$(poll_bounds _bounds_for_contains "$sub" "$nth")"
-  [ -n "$bounds" ] || { echo "ERROR: no element with text containing \"$sub\" (nth=$nth) found on screen" >&2; return 1; }
+  [ -n "$bounds" ] || { echo "ERROR: no element with text containing \"$sub\" (nth=$nth) found on screen to swipe from" >&2; return 1; }
   nums="$(printf '%s' "$bounds" | grep -o '[0-9]\+')"
   # shellcheck disable=SC2206
   local arr=($nums)
   x1="${arr[0]}"; y1="${arr[1]}"; x2="${arr[2]}"; y2="${arr[3]}"
   cx=$(( (x1 + x2) / 2 )); cy=$(( (y1 + y2) / 2 ))
-  ADB shell input swipe "$cx" "$cy" "$cx" $(( cy - delta )) 300
+  case "$dir" in
+    up)    ex="$cx";             ey=$(( cy - delta )) ;;
+    down)  ex="$cx";             ey=$(( cy + delta )) ;;
+    left)  ex=$(( cx - delta )); ey="$cy" ;;
+    right) ex=$(( cx + delta )); ey="$cy" ;;
+  esac
+  ADB shell input swipe "$cx" "$cy" "$ex" "$ey" 300
+}
+
+# find_and_long_press <mode> <value> [nth] [duration_ms]: press-and-hold on
+# an element located by mode: text (exact), contains (substring of text), or
+# desc (exact content-desc). input(1) has no dedicated long-press command; a
+# zero-distance swipe held longer than the framework's ~500ms long-click
+# timeout is how a press-and-hold is expressed over adb.
+find_and_long_press() {
+  local mode="$1" value="$2" nth="${3:-1}" dur="${4:-1000}" bounds cx cy
+  case "$mode" in
+    text)     bounds="$(poll_bounds _bounds_for_text "$value" "$nth")" ;;
+    contains) bounds="$(poll_bounds _bounds_for_contains "$value" "$nth")" ;;
+    desc)     bounds="$(poll_bounds _bounds_for_desc "$value" "$nth")" ;;
+  esac
+  [ -n "$bounds" ] || { echo "ERROR: no element found for long_press (${mode}=\"${value}\", nth=$nth)" >&2; return 1; }
+  read -r cx cy <<<"$(center_from_bounds "$bounds")"
+  ADB shell input swipe "$cx" "$cy" "$cx" "$cy" "$dur"
+}
+
+# find_and_double_tap <mode> <value> [nth]: double-taps an element located by
+# mode (text/contains/desc). Both taps are issued inside ONE on-device shell
+# command; two separate adb invocations would leave a gap between taps wider
+# than most apps' double-tap window.
+find_and_double_tap() {
+  local mode="$1" value="$2" nth="${3:-1}" bounds cx cy
+  case "$mode" in
+    text)     bounds="$(poll_bounds _bounds_for_text "$value" "$nth")" ;;
+    contains) bounds="$(poll_bounds _bounds_for_contains "$value" "$nth")" ;;
+    desc)     bounds="$(poll_bounds _bounds_for_desc "$value" "$nth")" ;;
+  esac
+  [ -n "$bounds" ] || { echo "ERROR: no element found for double_tap (${mode}=\"${value}\", nth=$nth)" >&2; return 1; }
+  read -r cx cy <<<"$(center_from_bounds "$bounds")"
+  ADB shell "input tap $cx $cy && input tap $cx $cy"
+}
+
+# find_and_drag <from-mode> <from-value> <from-nth> <to-mode> <to-value>
+#               <to-nth> [duration_ms]
+# Drags one element onto another: source located by from-mode (text/contains/
+# desc), drop target by to-mode (same three, or "point" with to-value "X Y"
+# for a raw coordinate drop zone like an unlabeled trash target).
+find_and_drag() {
+  local from_mode="$1" from_value="$2" from_nth="${3:-1}" \
+        to_mode="$4" to_value="$5" to_nth="${6:-1}" dur="${7:-800}"
+  local fbounds tbounds fx fy tx ty dnd_out dnd_ok=1
+  case "$from_mode" in
+    text)     fbounds="$(poll_bounds _bounds_for_text "$from_value" "$from_nth")" ;;
+    contains) fbounds="$(poll_bounds _bounds_for_contains "$from_value" "$from_nth")" ;;
+    desc)     fbounds="$(poll_bounds _bounds_for_desc "$from_value" "$from_nth")" ;;
+  esac
+  [ -n "$fbounds" ] || { echo "ERROR: no element found to drag (${from_mode}=\"${from_value}\", nth=$from_nth)" >&2; return 1; }
+  read -r fx fy <<<"$(center_from_bounds "$fbounds")"
+  case "$to_mode" in
+    text)     tbounds="$(poll_bounds _bounds_for_text "$to_value" "$to_nth")" ;;
+    contains) tbounds="$(poll_bounds _bounds_for_contains "$to_value" "$to_nth")" ;;
+    desc)     tbounds="$(poll_bounds _bounds_for_desc "$to_value" "$to_nth")" ;;
+    point)    tbounds="" ; tx="${to_value% *}"; ty="${to_value#* }" ;;
+  esac
+  if [ "$to_mode" != "point" ]; then
+    [ -n "$tbounds" ] || { echo "ERROR: no drop target found (${to_mode}=\"${to_value}\", nth=$to_nth)" >&2; return 1; }
+    read -r tx ty <<<"$(center_from_bounds "$tbounds")"
+  fi
+  # draganddrop (API 24+) sends real drag-start/drop events that some drag
+  # targets require to accept the drop; fall back to a slow swipe where the
+  # subcommand doesn't exist (older devices print a usage error).
+  dnd_out="$(ADB shell input draganddrop "$fx" "$fy" "$tx" "$ty" "$dur" 2>&1)" || dnd_ok=0
+  case "$dnd_out" in *usage:*|*Usage:*|*"unknown command"*) dnd_ok=0 ;; esac
+  if [ "$dnd_ok" = 0 ]; then
+    ADB shell input swipe "$fx" "$fy" "$tx" "$ty" "$dur"
+  fi
 }
 
 # find_and_tap_desc <exact content-desc> [nth]
@@ -778,6 +891,68 @@ perform_action() {
     swipe_up_from_contains)
       find_and_swipe_up_from_contains "$(jq -r '.text' <<<"$step")" "$(jq -r '.delta_y // 500' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"
       ;;
+    swipe_element)
+      find_and_swipe_direction "$(jq -r '.text' <<<"$step")" "$(jq -r '.direction // "up"' <<<"$step")" "$(jq -r '.delta // 500' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"
+      ;;
+    long_press)
+      local lp_dur lp_text lp_contains lp_desc lp_x lp_y
+      lp_dur="$(jq -r '.duration_ms // 1000' <<<"$step")"
+      lp_text="$(jq -r '.text // empty' <<<"$step")"
+      lp_contains="$(jq -r '.contains // empty' <<<"$step")"
+      lp_desc="$(jq -r '.desc // empty' <<<"$step")"
+      if [ -n "$lp_text" ]; then
+        find_and_long_press text "$lp_text" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      elif [ -n "$lp_contains" ]; then
+        find_and_long_press contains "$lp_contains" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      elif [ -n "$lp_desc" ]; then
+        find_and_long_press desc "$lp_desc" "$(jq -r '.nth // 1' <<<"$step")" "$lp_dur"
+      else
+        lp_x="$(jq -r '.x // empty' <<<"$step")"; lp_y="$(jq -r '.y // empty' <<<"$step")"
+        if [ -n "$lp_x" ] && [ -n "$lp_y" ]; then
+          ADB shell input swipe "$lp_x" "$lp_y" "$lp_x" "$lp_y" "$lp_dur"
+        else
+          echo "ERROR: long_press needs 'text', 'contains', 'desc', or 'x'+'y'" >&2; return 1
+        fi
+      fi
+      ;;
+    double_tap)
+      local dt_text dt_contains dt_desc dt_x dt_y
+      dt_text="$(jq -r '.text // empty' <<<"$step")"
+      dt_contains="$(jq -r '.contains // empty' <<<"$step")"
+      dt_desc="$(jq -r '.desc // empty' <<<"$step")"
+      if [ -n "$dt_text" ]; then
+        find_and_double_tap text "$dt_text" "$(jq -r '.nth // 1' <<<"$step")"
+      elif [ -n "$dt_contains" ]; then
+        find_and_double_tap contains "$dt_contains" "$(jq -r '.nth // 1' <<<"$step")"
+      elif [ -n "$dt_desc" ]; then
+        find_and_double_tap desc "$dt_desc" "$(jq -r '.nth // 1' <<<"$step")"
+      else
+        dt_x="$(jq -r '.x // empty' <<<"$step")"; dt_y="$(jq -r '.y // empty' <<<"$step")"
+        if [ -n "$dt_x" ] && [ -n "$dt_y" ]; then
+          ADB shell "input tap $dt_x $dt_y && input tap $dt_x $dt_y"
+        else
+          echo "ERROR: double_tap needs 'text', 'contains', 'desc', or 'x'+'y'" >&2; return 1
+        fi
+      fi
+      ;;
+    drag_and_drop)
+      local dd_to_text dd_to_desc dd_x dd_y
+      dd_to_text="$(jq -r '.to_text // empty' <<<"$step")"
+      dd_to_desc="$(jq -r '.to_desc // empty' <<<"$step")"
+      dd_x="$(jq -r '.x // empty' <<<"$step")"; dd_y="$(jq -r '.y // empty' <<<"$step")"
+      if [ -n "$dd_to_text" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          contains "$dd_to_text" "$(jq -r '.to_nth // 1' <<<"$step")" "$(jq -r '.duration_ms // 800' <<<"$step")"
+      elif [ -n "$dd_to_desc" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          desc "$dd_to_desc" "$(jq -r '.to_nth // 1' <<<"$step")" "$(jq -r '.duration_ms // 800' <<<"$step")"
+      elif [ -n "$dd_x" ] && [ -n "$dd_y" ]; then
+        find_and_drag contains "$(jq -r '.from_text' <<<"$step")" "$(jq -r '.from_nth // 1' <<<"$step")" \
+          point "$dd_x $dd_y" 1 "$(jq -r '.duration_ms // 800' <<<"$step")"
+      else
+        echo "ERROR: drag_and_drop needs a drop target: 'to_text', 'to_desc', or 'x'+'y'" >&2; return 1
+      fi
+      ;;
     tap_xy)
       ADB shell input tap "$(jq -r '.x' <<<"$step")" "$(jq -r '.y' <<<"$step")"
       maybe_type "$step"
@@ -801,12 +976,17 @@ perform_action() {
       do_exec_step "$step"
       ;;
     swipe)
-      local dir cx y1 y2
+      local dir cx cy x1 x2 y1 y2 dur
       dir="$(jq -r '.direction' <<<"$step")"
-      cx=$(( SCREEN_W / 2 ))
-      if [ "$dir" = "up" ]; then y1=$(( SCREEN_H * 70 / 100 )); y2=$(( SCREEN_H * 30 / 100 ))
-      else y1=$(( SCREEN_H * 30 / 100 )); y2=$(( SCREEN_H * 70 / 100 )); fi
-      ADB shell input swipe "$cx" "$y1" "$cx" "$y2" 400
+      dur="$(jq -r '.duration_ms // 400' <<<"$step")"
+      cx=$(( SCREEN_W / 2 )); cy=$(( SCREEN_H / 2 ))
+      case "$dir" in
+        up)    ADB shell input swipe "$cx" $(( SCREEN_H * 70 / 100 )) "$cx" $(( SCREEN_H * 30 / 100 )) "$dur" ;;
+        down)  ADB shell input swipe "$cx" $(( SCREEN_H * 30 / 100 )) "$cx" $(( SCREEN_H * 70 / 100 )) "$dur" ;;
+        left)  ADB shell input swipe $(( SCREEN_W * 80 / 100 )) "$cy" $(( SCREEN_W * 20 / 100 )) "$cy" "$dur" ;;
+        right) ADB shell input swipe $(( SCREEN_W * 20 / 100 )) "$cy" $(( SCREEN_W * 80 / 100 )) "$cy" "$dur" ;;
+        *) echo "ERROR: invalid swipe direction '$dir' (expected up, down, left, or right)" >&2; return 1 ;;
+      esac
       ;;
     swipe_until_contains)
       find_and_tap_after_scrolling "$(jq -r '.text' <<<"$step")" "$(jq -r '.max_swipes // 6' <<<"$step")" "$(jq -r '.nth // 1' <<<"$step")"

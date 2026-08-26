@@ -31,7 +31,7 @@ model on request. Re-run the checks any time with `./setup.sh --check`.
 | Tab | What it does |
 | --- | --- |
 | App | pick a connected device, list installed packages (user or all), auto-resolve the launch activity |
-| Narration | engine choice (Piper default / macOS say / none), voice picker with search, rate slider, audio preview of any voice, piper model and binary paths |
+| Narration | engine choice (Piper default / macOS say / none), voice picker with search, rate slider, audio preview, in-app browsing and one-click download of any HuggingFace Piper voice |
 | Steps | full tree editor for demo steps JSON and spec scenarios: add/edit/duplicate/delete/reorder, nested if.then/else branches, schema-driven forms with inline help and narration field, validation with per-step highlighting, run/dry-run buttons, open/save/recents |
 | Spec Tests | scenarios directory and app id, per-file scenario browser with inline validation, edit scenarios in the tree editor, create files/scenarios, run one/file/all, live log, coverage report table |
 | Output & Advanced | output folder and file name, segment seconds, keep-workdir, silent recording override, script path |

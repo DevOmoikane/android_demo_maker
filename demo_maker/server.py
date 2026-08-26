@@ -98,6 +98,25 @@ def api_tts_voices(handler, query, body):
     return out
 
 
+def api_tts_catalog(handler, query, body):
+    force = (query.get("refresh") or ["0"])[0] == "1"
+    return tts.fetch_piper_catalog(force=force)
+
+
+def api_tts_download(handler, query, body):
+    key = str(body.get("key") or "")
+    try:
+        return tts.start_voice_download(key)
+    except tts.TtsError as exc:
+        if "already in progress" in str(exc):
+            raise ApiError(409, str(exc))
+        raise
+
+
+def api_tts_download_status(handler, query, body):
+    return tts.voice_download_status()
+
+
 def api_tts_sample(handler, query, body):
     engine = str(body.get("engine") or "")
     if engine not in ("say", "piper"):
@@ -347,6 +366,8 @@ GET_ROUTES = {
     "/api/spec/state": api_spec_state,
     "/api/spec/file": api_spec_file_get,
     "/tts/voices": api_tts_voices,
+    "/tts/catalog": api_tts_catalog,
+    "/tts/download/status": api_tts_download_status,
 }
 
 POST_ROUTES = {
@@ -359,6 +380,7 @@ POST_ROUTES = {
     "/api/run/cancel": api_run_cancel,
     "/api/spec/run": api_spec_run,
     "/tts/sample": api_tts_sample,
+    "/tts/download": api_tts_download,
 }
 
 PUT_ROUTES = {

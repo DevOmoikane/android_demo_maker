@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -72,6 +73,52 @@ class StepsValidationTests(unittest.TestCase):
         step = steps.default_step("tap_until_gone")
         self.assertEqual(15, step["max_attempts"])
         self.assertIsNone(steps.default_step("nonexistent"))
+
+    def test_long_press_requires_a_locator(self):
+        errors = steps.validate_steps([{"action": "long_press"}])
+        self.assertTrue(any("needs 'text'" in e["message"] for e in errors))
+
+    def test_double_tap_half_point_rejected(self):
+        errors = steps.validate_steps(
+            [{"action": "double_tap", "x": 5}])
+        self.assertTrue(any("together" in e["message"] for e in errors))
+
+    def test_long_press_accepts_each_locator(self):
+        for step in ({"action": "long_press", "text": "Hi"},
+                     {"action": "long_press", "contains": "Hi"},
+                     {"action": "long_press", "desc": "icon"},
+                     {"action": "long_press", "x": 5, "y": 6}):
+            self.assertEqual([], steps.validate_steps([step]))
+
+    def test_swipe_directions(self):
+        for direction in ("up", "down", "left", "right"):
+            doc = [{"action": "swipe", "direction": direction}]
+            self.assertEqual([], steps.validate_steps(doc))
+        errors = steps.validate_steps([{"action": "swipe",
+                                        "direction": "sideways"}])
+        self.assertTrue(any("must be one of" in e["message"]
+                            for e in errors))
+
+    def test_swipe_element_requires_anchor_text(self):
+        errors = steps.validate_steps([{"action": "swipe_element"}])
+        self.assertIn("missing required field 'text'",
+                      errors[0]["message"])
+
+    def test_drag_and_drop_needs_exactly_one_target(self):
+        base = {"action": "drag_and_drop", "from_text": "card"}
+        errors = steps.validate_steps([dict(base)])
+        self.assertTrue(any("drop target" in e["message"] for e in errors))
+        errors = steps.validate_steps([dict(base, to_text="Trash",
+                                            to_desc="trash")])
+        self.assertTrue(any("only one" in e["message"] for e in errors))
+        for target in ({"to_text": "Trash"}, {"to_desc": "trash"},
+                       {"x": 10, "y": 20}):
+            self.assertEqual([], steps.validate_steps([dict(base, **target)]))
+
+    def test_gestures_available_for_spec_scenarios(self):
+        for action in ("long_press", "double_tap", "swipe_element",
+                       "drag_and_drop"):
+            self.assertIn(action, spec.SPEC_ACTIONS)
 
 
 class TtsParsingTests(unittest.TestCase):
@@ -402,6 +449,85 @@ class SpecScenarioTests(unittest.TestCase):
             spec_app_id="", serial="", spec_script="/nope.sh",
             spec_scenarios_dir="/gone"))
         self.assertEqual(4, len(errors))
+
+
+class PiperCatalogTests(unittest.TestCase):
+    def setUp(self):
+        self.orig_cache = tts.CATALOG_CACHE_FILE
+        self.tmp = tempfile.TemporaryDirectory()
+        tts.CATALOG_CACHE_FILE = Path(self.tmp.name) / "piper-catalog.json"
+
+    def tearDown(self):
+        tts.CATALOG_CACHE_FILE = self.orig_cache
+        self.tmp.cleanup()
+
+    def test_entry_from_repo_dir(self):
+        entry = tts._entry_from_repo_dir("en/en_US/amy/medium", 123)
+        self.assertEqual("en_US-amy-medium", entry["key"])
+        self.assertEqual("en_US", entry["locale"])
+        self.assertEqual("medium", entry["quality"])
+        self.assertEqual(123, entry["size_bytes"])
+        self.assertEqual("en/en_US/amy/medium/en_US-amy-medium.onnx",
+                         entry["relpath"])
+
+    def test_entry_underscore_name(self):
+        # en_US-hfc_female-medium: the voice name itself contains an _
+        entry = tts._entry_from_tree_path(
+            "en/en_US/hfc_female/medium/en_US-hfc_female-medium.onnx", 0)
+        self.assertEqual("en_US-hfc_female-medium", entry["key"])
+
+    def test_entry_rejects_junk(self):
+        self.assertIsNone(tts._entry_from_repo_dir("en/en_US/amy"))
+        self.assertIsNone(tts._entry_from_repo_dir("../etc/passwd/x"))
+        self.assertIsNone(tts._entry_from_tree_path(
+            "en/en_US/amy/medium/en_US-amy-medium.onnx.json", 0))
+        self.assertIsNone(tts._entry_from_tree_path(
+            "en/en_US/other/medium/en_US-amy-medium.onnx", 0))
+
+    def test_catalog_cache_roundtrip_and_staleness(self):
+        payload = {"source": "network", "fetched_at": time.time(),
+                   "voices": [{"key": "k"}]}
+        tts._write_catalog_cache(payload)
+        fresh = tts._read_catalog_cache(max_age=3600)
+        self.assertIsNotNone(fresh)
+        old = dict(payload, fetched_at=time.time() - 100000)
+        tts._write_catalog_cache(old)
+        self.assertIsNone(tts._read_catalog_cache(max_age=3600))
+        self.assertIsNotNone(tts._read_catalog_cache(max_age=None))
+
+    def test_bundled_catalog_is_wellformed(self):
+        data = tts._bundled_catalog()
+        self.assertGreaterEqual(len(data["voices"]), 5)
+        for voice in data["voices"]:
+            self.assertNotIn("..", voice["relpath"])
+            self.assertTrue(voice["relpath"].endswith(voice["key"] + ".onnx"))
+
+    def test_unknown_key_rejected(self):
+        with self.assertRaises(tts.TtsError):
+            tts.start_voice_download("../../evil")
+
+    def test_fetch_falls_back_when_offline(self):
+        def boom(*a, **k):
+            raise OSError("no network")
+        orig_urlopen = tts.urllib.request.urlopen
+        tts._write_catalog_cache({
+            "source": "network",
+            "fetched_at": time.time() - 200000,
+            "voices": [{"key": "en_US-old-medium",
+                        "locale": "en_US",
+                        "name": "old",
+                        "quality": "medium",
+                        "size_bytes": 1,
+                        "relpath":
+                        "en/en_US/old/medium/en_US-old-medium.onnx"}]})
+        try:
+            tts.urllib.request.urlopen = boom
+            data = tts.fetch_piper_catalog(force=True)
+            self.assertEqual("cache", data["source"])
+            self.assertEqual("en_US-old-medium", data["voices"][0]["key"])
+            self.assertFalse(data["voices"][0]["installed"])
+        finally:
+            tts.urllib.request.urlopen = orig_urlopen
 
 
 class RunnerReportTests(unittest.TestCase):

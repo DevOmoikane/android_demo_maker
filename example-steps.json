@@ -58,6 +58,36 @@
     "narration": "Notes sync instantly across devices."
   },
   {
+    "action": "long_press",
+    "contains": "My first note",
+    "duration_ms": 1200,
+    "narration": "Pressing and holding a note opens its context menu."
+  },
+  {
+    "action": "swipe_element",
+    "text": "My first note",
+    "direction": "right",
+    "delta": 600,
+    "narration": "Swiping the row reveals quick actions."
+  },
+  {
+    "action": "drag_and_drop",
+    "from_text": "My first note",
+    "to_desc": "Trash",
+    "duration_ms": 900,
+    "narration": "Drag it onto the trash target to delete it."
+  },
+  {
+    "action": "double_tap",
+    "desc": "Archive",
+    "narration": "Or a double tap archives it instantly."
+  },
+  {
+    "action": "swipe",
+    "direction": "left",
+    "narration": "The screen itself swipes too, in any direction."
+  },
+  {
     "action": "back",
     "narration": "Going back keeps everything saved."
   },
