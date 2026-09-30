@@ -17,3 +17,7 @@ __pycache__/
 # Editor and OS noise
 .DS_Store
 .history/
+
+# Isolated task workspaces (git worktrees) and superpowers scratch
+.worktrees/
+.superpowers/
