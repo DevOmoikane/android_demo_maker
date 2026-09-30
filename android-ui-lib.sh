@@ -6,16 +6,120 @@
 # checking common bottom-nav destinations; redefine it per app as needed.
 #
 # Callers must define, before sourcing this file:
-#   ADB()               function/alias: adb -s "$SERIAL" "$@"
-#   WORKDIR             scratch dir (this file writes $WORKDIR/dump.xml)
-#   SCREEN_W, SCREEN_H  device pixel dimensions (only find_and_tap_after_scrolling needs them)
+#   SERIALS          indexed array of serials; SERIALS[d-1] is device d
+#   DEVICE_COUNT     how many entries of SERIALS are live (1 or 2)
+#   WORKDIR          scratch dir (this file writes $WORKDIR/dump_$CUR_DEV.xml)
+#   SCREEN_W_BY_DEV  indexed array of device pixel widths
+#   SCREEN_H_BY_DEV  indexed array of device pixel heights
+# Optional, read by use_device() only to give exec steps the right context:
+#   APP_BY_DEV       indexed array of package names, one per device
+#   ACTIVITY_BY_DEV  indexed array of launch activities, one per device
+# A caller that sets only SERIAL and SCREEN_W/SCREEN_H gets single-device
+# behavior: SERIALS is seeded from SERIAL and DEVICE_COUNT stays 1.
+
+# ---------------------------------------------------------------- device cursor
+# SERIALS[d-1] is the adb serial for device d. Everything below reaches the
+# device only through ADB(), so a multi-device caller is a matter of setting
+# the cursor, not of threading a device argument through 26 functions.
+: "${DEVICE_COUNT:=1}"
+if [ -z "${SERIALS[*]:-}" ]; then
+  SERIALS=("${SERIAL:-}" "")
+fi
+CUR_DEV=1
+
+ADB() { adb -s "${SERIALS[$((CUR_DEV - 1))]}" "$@"; }
+ADB_FOR() { local d="$1"; shift; adb -s "${SERIALS[$((d - 1))]}" "$@"; }
+
+# Loads device d's state into the bare names the rest of this file reads, so
+# nothing below has to know how many devices are attached. Call it once per
+# step, before dispatching that step's action.
+use_device() {
+  local d="${1:-1}" i=$(( ${1:-1} - 1 ))
+  CUR_DEV="$d"
+  SCREEN_W="${SCREEN_W_BY_DEV[$i]:-1080}"
+  SCREEN_H="${SCREEN_H_BY_DEV[$i]:-2400}"
+  LAST_EXEC_STATUS="${LAST_EXEC_STATUS_BY_DEV[$i]:-}"
+  LAST_EXEC_OUTPUT="${LAST_EXEC_OUTPUT_BY_DEV[$i]:-}"
+  if [ -n "${APP_BY_DEV[$i]:-}" ]; then
+    APP_ID="${APP_BY_DEV[$i]}"
+    ACTIVITY="${ACTIVITY_BY_DEV[$i]:-$ACTIVITY}"
+  fi
+  export DEMO_SERIAL="${SERIALS[$i]}" DEMO_APP_ID="$APP_ID" \
+         DEMO_ACTIVITY="$ACTIVITY" DEMO_SCREEN_W="$SCREEN_W" \
+         DEMO_SCREEN_H="$SCREEN_H"
+}
+
+# Points the device cursor at the step's own device. Absent means device 1 and
+# never inherits from an earlier step, so a step reads the same wherever it
+# sits in the file. Call it once per step, before dispatching that step's
+# action.
+step_device() {
+  local d
+  d="$(jq -r '.device // 1' <<<"$1")"
+  case "$d" in
+    1|2) use_device "$d" ;;
+    *) echo "ERROR: step 'device' must be 1 or 2 (got '$d')" >&2; return 1 ;;
+  esac
+}
+
+# ----------------------------------------------------------- auto-rotate hygiene
+# Auto-rotate belongs to whoever owns the device, not to a test run. `adb shell
+# monkey -p <pkg> -c android.intent.category.LAUNCHER 1` turns it ON and never
+# puts it back (monkey thaws rotation during its own setup), which is how it
+# kept coming back on after a session. Confirmed on a Pixel 6 Pro, 2026-08-28:
+# accelerometer_rotation 0 -> 1 on every monkey launch, unchanged by
+# `am start -n`, `adb install`, `pm clear` and `uiautomator dump`. Nothing here
+# launches with monkey; the pair below catches anything else that moves the
+# setting, on every live device.
+
+# Records the auto-rotate setting of every live device before any step can move
+# it. Per device: an if step on device 2 must read device 2's slot, and a
+# restore must never touch a device it did not snapshot.
+AUTOROTATE_AT_START=("" "")
+autorotate_snapshot() {
+  [ "${GUARD_AUTOROTATE:-true}" = "true" ] || return 0
+  local d i v
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    i=$((d - 1))
+    v="$(ADB_FOR "$d" shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+    case "$v" in
+      0|1) AUTOROTATE_AT_START[$i]="$v" ;;
+      *)   AUTOROTATE_AT_START[$i]="" ;;
+    esac
+  done
+}
+
+# Puts the setting back if the run moved it, and says so: a silent restore
+# would hide the next tool that starts flipping it.
+autorotate_restore() {
+  local d i now
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    i=$((d - 1))
+    [ -n "${AUTOROTATE_AT_START[$i]}" ] || continue
+    now="$(ADB_FOR "$d" shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+    [ "$now" = "${AUTOROTATE_AT_START[$i]}" ] && continue
+    ADB_FOR "$d" shell settings put system accelerometer_rotation \
+      "${AUTOROTATE_AT_START[$i]}" >/dev/null 2>&1
+    echo "==> device ${d} auto-rotate had been changed during this run (${AUTOROTATE_AT_START[$i]} -> ${now}); restored to ${AUTOROTATE_AT_START[$i]}" >&2
+  done
+}
+
+# True when device d is attached over USB. Radio toggles are refused otherwise:
+# on wireless debugging, disabling wifi cuts adb's own transport and the device
+# is left unreachable with its radios off.
+device_is_usb() {
+  local d="${1:-$CUR_DEV}"
+  adb devices -l | awk -v s="${SERIALS[$((d - 1))]}" '$1 == s' | grep -q ' usb:'
+}
 
 # Dumps the live hierarchy fresh before every lookup - this is not a hot loop, so the
 # ~300ms dump cost per lookup is a non-issue and it's the only way to stay correct as
-# screens actually change between steps.
+# screens actually change between steps. The path is per device so a dump that
+# failed to pull cannot leave the other device's hierarchy where the next read
+# looks.
 dump_ui() {
   ADB shell uiautomator dump /sdcard/_android_demo_dump.xml >/dev/null 2>&1 || true
-  ADB pull /sdcard/_android_demo_dump.xml "$WORKDIR/dump.xml" >/dev/null 2>&1 || true
+  ADB pull /sdcard/_android_demo_dump.xml "$WORKDIR/dump_${CUR_DEV}.xml" >/dev/null 2>&1 || true
 }
 
 # center_from_bounds "[x1,y1][x2,y2]" -> "cx cy"
@@ -57,7 +161,7 @@ poll_bounds() {
 _bounds_for_text() {
   local text="$1" nth="${2:-1}"
   dump_ui
-  grep -o "text=\"${text}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump.xml" | sed -n "${nth}p" | grep -o 'bounds="[^"]*"' || true
+  grep -o "text=\"${text}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump_${CUR_DEV}.xml" | sed -n "${nth}p" | grep -o 'bounds="[^"]*"' || true
 }
 
 _bounds_for_contains() {
@@ -74,14 +178,14 @@ _bounds_for_contains() {
         fi
         ;;
     esac
-  done < <(grep -o 'text="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump.xml" || true)
+  done < <(grep -o 'text="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump_${CUR_DEV}.xml" || true)
   printf '%s' "$bounds"
 }
 
 _bounds_for_desc() {
   local desc="$1" nth="${2:-1}"
   dump_ui
-  grep -o "content-desc=\"${desc}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump.xml" | sed -n "${nth}p" | grep -o 'bounds="[^"]*"' || true
+  grep -o "content-desc=\"${desc}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump_${CUR_DEV}.xml" | sed -n "${nth}p" | grep -o 'bounds="[^"]*"' || true
 }
 
 # Substring match on content-desc, same shape as _bounds_for_contains but for desc -
@@ -101,7 +205,7 @@ _bounds_for_desc_contains() {
         fi
         ;;
     esac
-  done < <(grep -o 'content-desc="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump.xml" || true)
+  done < <(grep -o 'content-desc="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump_${CUR_DEV}.xml" || true)
   printf '%s' "$bounds"
 }
 
@@ -131,13 +235,13 @@ tap_until_gone() {
   local tap_text="$1" watch_text="$2" max="${3:-15}" interval="${4:-3}" i bounds
   for i in $(seq 1 "$max"); do
     dump_ui
-    grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump.xml" || return 0
-    bounds="$(grep -o "text=\"${tap_text}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump.xml" | head -1 | grep -o 'bounds="[^"]*"')"
+    grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump_${CUR_DEV}.xml" || return 0
+    bounds="$(grep -o "text=\"${tap_text}\"[^>]*bounds=\"[^\"]*\"" "$WORKDIR/dump_${CUR_DEV}.xml" | head -1 | grep -o 'bounds="[^"]*"')"
     [ -n "$bounds" ] && ADB shell input tap $(center_from_bounds "$bounds")
     sleep "$interval"
   done
   dump_ui
-  if grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump.xml"; then
+  if grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump_${CUR_DEV}.xml"; then
     echo "ERROR: still on screen with \"$watch_text\" after $max attempts tapping \"$tap_text\"" >&2
     return 1
   fi
@@ -152,11 +256,11 @@ wait_gone() {
   local watch_text="$1" max="${2:-20}" interval="${3:-3}" i
   for i in $(seq 1 "$max"); do
     dump_ui
-    grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump.xml" || return 0
+    grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump_${CUR_DEV}.xml" || return 0
     sleep "$interval"
   done
   dump_ui
-  if grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump.xml"; then
+  if grep -qF "text=\"${watch_text}\"" "$WORKDIR/dump_${CUR_DEV}.xml"; then
     echo "ERROR: still on screen with \"$watch_text\" after $max attempts (${interval}s apart)" >&2
     return 1
   fi
@@ -327,18 +431,18 @@ find_and_tap_desc_contains() {
 _checked_for_text() {
   local text="$1" nth="${2:-1}"
   dump_ui
-  grep -o "text=\"${text}\"[^>]*checked=\"[^\"]*\"" "$WORKDIR/dump.xml" | sed -n "${nth}p" | sed -n 's/.*checked="\([^"]*\)".*/\1/p'
+  grep -o "text=\"${text}\"[^>]*checked=\"[^\"]*\"" "$WORKDIR/dump_${CUR_DEV}.xml" | sed -n "${nth}p" | sed -n 's/.*checked="\([^"]*\)".*/\1/p'
 }
 
 _checked_for_desc() {
   local desc="$1" nth="${2:-1}"
   dump_ui
-  grep -o "content-desc=\"${desc}\"[^>]*checked=\"[^\"]*\"" "$WORKDIR/dump.xml" | sed -n "${nth}p" | sed -n 's/.*checked="\([^"]*\)".*/\1/p'
+  grep -o "content-desc=\"${desc}\"[^>]*checked=\"[^\"]*\"" "$WORKDIR/dump_${CUR_DEV}.xml" | sed -n "${nth}p" | sed -n 's/.*checked="\([^"]*\)".*/\1/p'
 }
 
 assert_signed_in() {
   dump_ui
-  if grep -qF 'content-desc="Settings"' "$WORKDIR/dump.xml" || grep -qF 'content-desc="Family"' "$WORKDIR/dump.xml"; then
+  if grep -qF 'content-desc="Settings"' "$WORKDIR/dump_${CUR_DEV}.xml" || grep -qF 'content-desc="Family"' "$WORKDIR/dump_${CUR_DEV}.xml"; then
     return 0
   fi
   echo "ERROR: app doesn't look signed in (no Home/Family/Settings nav found)." >&2
@@ -423,7 +527,7 @@ find_text_value() {
       TEXT_VALUE="$(xml_unescape "$val")"
       return 0
     fi
-  done < <(grep -o 'text="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump.xml" || true)
+  done < <(grep -o 'text="[^"]*"[^>]*bounds="[^"]*"' "$WORKDIR/dump_${CUR_DEV}.xml" || true)
   return 1
 }
 
@@ -459,55 +563,21 @@ screen_condition_met() {
   done
 }
 
-# ---------------------------------------------------------------- device hygiene
-#
-# Auto-rotate belongs to whoever owns the device, not to a test run. `adb shell
-# monkey -p <pkg> -c android.intent.category.LAUNCHER 1` turns it ON and never
-# puts it back (monkey thaws rotation during its own setup), which is how it
-# kept coming back on after a session. Confirmed on a Pixel 6 Pro, 2026-08-28:
-# accelerometer_rotation 0 -> 1 on every monkey launch, unchanged by
-# `am start -n`, `adb install`, `pm clear` and `uiautomator dump`. Nothing here
-# launches with monkey; these two functions catch anything else that moves the
-# setting.
-
-AUTOROTATE_AT_START=""
-
-# Reads the setting so autorotate_restore can put it back. No-op when the guard
-# is turned off, or when the device answers something other than 0/1 (an
-# emulator can).
-autorotate_snapshot() {
-  [ "${GUARD_AUTOROTATE:-true}" = "true" ] || return 0
-  AUTOROTATE_AT_START="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
-  case "$AUTOROTATE_AT_START" in 0|1) ;; *) AUTOROTATE_AT_START="" ;; esac
-}
-
-# Puts the setting back if the run moved it, and says so: a silent restore
-# would hide the next tool that starts flipping it.
-autorotate_restore() {
-  [ -n "$AUTOROTATE_AT_START" ] || return 0
-  local now
-  now="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
-  [ "$now" = "$AUTOROTATE_AT_START" ] && return 0
-  ADB shell settings put system accelerometer_rotation "$AUTOROTATE_AT_START" >/dev/null 2>&1
-  echo "==> auto-rotate had been changed during this run ($AUTOROTATE_AT_START -> $now); restored to $AUTOROTATE_AT_START" >&2
-}
-
-# True when the device is attached over USB. Radio toggles are refused
-# otherwise: on wireless debugging, disabling wifi cuts adb's own transport and
-# the device is left unreachable with its radios off.
-device_is_usb() {
-  adb devices -l | awk -v s="$SERIAL" '$1 == s' | grep -q ' usb:'
-}
-
 # do_exec_step <exec-step> - runs the step's external command synchronously
 # and remembers its exit status + stdout in LAST_EXEC_STATUS /
 # LAST_EXEC_OUTPUT for a following if step (source last_command). on_fail
 # decides whether a non-zero status aborts the run ("stop", the default) or
 # just logs ("continue"; the recorded status still reflects the failure).
 # DEMO_SERIAL/DEMO_APP_ID/DEMO_ACTIVITY/DEMO_SCREEN_W/DEMO_SCREEN_H are
-# exported by the caller script, not here, so the command sees them.
+# exported by use_device() from the caller's per-device arrays, so the command
+# sees the device it is running against. LAST_EXEC_STATUS/LAST_EXEC_OUTPUT are
+# the current device's values; the *_BY_DEV arrays behind them hold one entry
+# per device. A bash array and a scalar cannot share one name, so the store is
+# the array and the bare names stay what eval_condition reads.
 LAST_EXEC_STATUS=""
 LAST_EXEC_OUTPUT=""
+LAST_EXEC_STATUS_BY_DEV=("" "")
+LAST_EXEC_OUTPUT_BY_DEV=("" "")
 do_exec_step() {
   local step="$1" shell cmd status=0 out lines
   shell="$(jq -r '.shell // "bash"' <<<"$step")"
@@ -521,7 +591,7 @@ do_exec_step() {
   if [ "${GUARD_RADIO_TOGGLE_USB_ONLY:-true}" = "true" ] &&
      printf '%s' "$cmd" | grep -Eq 'svc +(wifi|data) +disable' &&
      ! device_is_usb; then
-    echo "ERROR: this exec step turns a radio off, and $SERIAL is not on USB." >&2
+    echo "ERROR: this exec step turns a radio off, and ${SERIALS[$((CUR_DEV - 1))]} is not on USB." >&2
     echo "       Over wireless debugging that kills adb's own transport mid-run and leaves" >&2
     echo "       the device offline with no way back in. Attach it by USB and re-run." >&2
     return 1
@@ -534,6 +604,11 @@ do_exec_step() {
   esac
   LAST_EXEC_STATUS="$status"
   LAST_EXEC_OUTPUT="$out"
+  # Keep this device's slot current, so a following if step that names a
+  # different device reads that device's output rather than this one's.
+  local i=$((CUR_DEV - 1))
+  LAST_EXEC_STATUS_BY_DEV[$i]="$LAST_EXEC_STATUS"
+  LAST_EXEC_OUTPUT_BY_DEV[$i]="$LAST_EXEC_OUTPUT"
   if [ -n "$out" ]; then
     lines="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
     printf '%s\n' "$out" | head -5 | sed 's/^/     | /'

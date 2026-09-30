@@ -180,18 +180,21 @@ if [ -z "$SERIAL" ]; then
   fi
   SERIAL="$(printf '%s\n' "$DEVICES" | head -n 1)"
 fi
-ADB() { adb -s "$SERIAL" "$@"; }
+SERIALS=("$SERIAL" "")
+DEVICE_COUNT=1
 
 # Resolve the launchable activity for APP_ID: explicit --activity wins;
 # otherwise ask the package manager for the MAIN/LAUNCHER intent handler;
 # fall back to the conventional ".MainActivity" if that comes up empty.
+# Asked with a literal adb -s because the library that owns ADB() is sourced
+# below, after the screen size is read.
 if [ -n "$ACTIVITY_OVERRIDE" ]; then
   case "$ACTIVITY_OVERRIDE" in
     */*) ACTIVITY="$ACTIVITY_OVERRIDE" ;;
     *)   ACTIVITY="${APP_ID}/${ACTIVITY_OVERRIDE}" ;;
   esac
 else
-  brief="$(ADB shell cmd package resolve-activity --brief \
+  brief="$(adb -s "$SERIAL" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
             "$APP_ID" 2>/dev/null | tr -d '\r')"
   act="$(printf '%s\n' "$brief" | grep "^${APP_ID}/" | head -n 1)"
@@ -203,7 +206,7 @@ WORKDIR="$(mktemp -d /tmp/android-spec-test-XXXXXX)"
 # Guarded: this trap runs even if an early exit happens before android-ui-lib.sh
 # is sourced, so only call autorotate_restore when it exists.
 trap 'command -v autorotate_restore >/dev/null 2>&1 && autorotate_restore; rm -rf "$WORKDIR"' EXIT
-read -r SCREEN_W SCREEN_H < <(ADB shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
+read -r SCREEN_W SCREEN_H < <(adb -s "$SERIAL" shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
 SCREEN_W="${SCREEN_W:-1080}"
 SCREEN_H="${SCREEN_H:-2400}"
 
@@ -213,10 +216,12 @@ source "${SCRIPT_DIR}/android-ui-lib.sh"
 # any step can move it; the EXIT trap above puts it back.
 autorotate_snapshot
 
-# Context exported to exec-step commands (and visible as $ENV in lambda),
-# same names as the general android_demo_maker tool uses.
-export DEMO_SERIAL="$SERIAL" DEMO_APP_ID="$APP_ID" DEMO_ACTIVITY="$ACTIVITY" \
-  DEMO_SCREEN_W="$SCREEN_W" DEMO_SCREEN_H="$SCREEN_H"
+SCREEN_W_BY_DEV=("$SCREEN_W" "")
+SCREEN_H_BY_DEV=("$SCREEN_H" "")
+APP_BY_DEV=("$APP_ID" "")
+ACTIVITY_BY_DEV=("$ACTIVITY" "")
+# Points the cursor at device 1 and exports the DEMO_* context exec steps read.
+use_device 1
 
 perform_action() {
   local action="$1" step="$2"
@@ -353,7 +358,7 @@ perform_action() {
     assert_text)
       local text; text="$(substitute_templates "$(jq -r '.text' <<<"$step")")" || return 1
       dump_ui
-      grep -qF "text=\"${text}\"" "$WORKDIR/dump.xml" \
+      grep -qF "text=\"${text}\"" "$WORKDIR/dump_${CUR_DEV}.xml" \
         || { echo "ERROR: expected text \"${text}\" not found" >&2; return 1; }
       ;;
     assert_text_eventually)
@@ -372,7 +377,7 @@ perform_action() {
     assert_desc)
       local desc; desc="$(substitute_templates "$(jq -r '.desc' <<<"$step")")" || return 1
       dump_ui
-      grep -qF "content-desc=\"${desc}\"" "$WORKDIR/dump.xml" \
+      grep -qF "content-desc=\"${desc}\"" "$WORKDIR/dump_${CUR_DEV}.xml" \
         || { echo "ERROR: expected content-desc \"${desc}\" not found" >&2; return 1; }
       ;;
     assert_desc_contains)
@@ -385,7 +390,7 @@ perform_action() {
     assert_gone)
       local text; text="$(substitute_templates "$(jq -r '.text' <<<"$step")")" || return 1
       dump_ui
-      if grep -qF "text=\"${text}\"" "$WORKDIR/dump.xml"; then
+      if grep -qF "text=\"${text}\"" "$WORKDIR/dump_${CUR_DEV}.xml"; then
         echo "ERROR: expected text \"${text}\" to be gone, still present" >&2; return 1
       fi
       ;;

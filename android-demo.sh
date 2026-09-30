@@ -275,27 +275,27 @@ if [ -z "$SERIAL" ]; then
   fi
   SERIAL="$(printf '%s\n' "$DEVICES" | head -n 1)"
 fi
-ADB() { adb -s "$SERIAL" "$@"; }
+SERIALS=("$SERIAL" "")
+DEVICE_COUNT=1
 
 # Resolve the launchable activity for APP_ID: explicit --activity wins;
 # otherwise ask the package manager for the MAIN/LAUNCHER intent handler;
 # fall back to the conventional ".MainActivity" if that comes up empty.
+# Asked with a literal adb -s because the library that owns ADB() is sourced
+# below, after the screen size is read.
 if [ -n "$ACTIVITY_OVERRIDE" ]; then
   case "$ACTIVITY_OVERRIDE" in
     */*) ACTIVITY="$ACTIVITY_OVERRIDE" ;;
     *)   ACTIVITY="${APP_ID}/${ACTIVITY_OVERRIDE}" ;;
   esac
 else
-  brief="$(ADB shell cmd package resolve-activity --brief \
+  brief="$(adb -s "$SERIAL" shell cmd package resolve-activity --brief \
             -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
             "$APP_ID" 2>/dev/null | tr -d '\r')"
   act="$(printf '%s\n' "$brief" | grep "^${APP_ID}/" | head -n 1)"
   [ -n "$act" ] || act="$(printf '%s\n' "$brief" | grep -m1 '/' || true)"
   ACTIVITY="${act:-${APP_ID}/.MainActivity}"
 fi
-
-# Context exported to exec-step commands (and visible as $ENV in lambda).
-export DEMO_SERIAL="$SERIAL" DEMO_APP_ID="$APP_ID" DEMO_ACTIVITY="$ACTIVITY"
 
 if [ "$NO_NARRATION" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   command -v ffmpeg >/dev/null 2>&1 || { echo "ERROR: ffmpeg not found on PATH" >&2; exit 1; }
@@ -337,9 +337,9 @@ WORKDIR="$(mktemp -d /tmp/android-demo-XXXXXX)"
 # evaluation, device hygiene) live in android-ui-lib.sh, shared with
 # android-spec-test.sh so both drive the UI the exact same way. This file
 # only adds what is specific to a narrated recording: the beat clock, the
-# screenrecord segment pump, and the TTS pipeline. The library reads ADB(),
-# WORKDIR and SCREEN_W/SCREEN_H when its functions run, never at source time:
-# ADB() and WORKDIR are set above, the screen size just below.
+# screenrecord segment pump, and the TTS pipeline. The library owns ADB() and
+# reads WORKDIR and SCREEN_W/SCREEN_H when its functions run, never at source
+# time: WORKDIR is set above, the screen size just below.
 source "${SCRIPT_DIR}/android-ui-lib.sh"
 
 # ---------------------------------------------------------------- device hygiene
@@ -347,7 +347,6 @@ source "${SCRIPT_DIR}/android-ui-lib.sh"
 # monkey -p <pkg> -c android.intent.category.LAUNCHER 1` turns it ON and never
 # puts it back (monkey thaws rotation during its own setup). Snapshot the
 # setting before any step can move it and restore it in cleanup().
-AUTOROTATE_AT_START=""
 autorotate_snapshot
 
 # Muted for the recording itself, not dry-run (no sound/video is captured there, and a
@@ -377,7 +376,12 @@ mkdir -p "$WORKDIR/audio" "$WORKDIR/video"
 read -r SCREEN_W SCREEN_H < <(ADB shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
 SCREEN_W="${SCREEN_W:-1080}"
 SCREEN_H="${SCREEN_H:-2400}"
-export DEMO_SCREEN_W="$SCREEN_W" DEMO_SCREEN_H="$SCREEN_H"
+SCREEN_W_BY_DEV=("$SCREEN_W" "")
+SCREEN_H_BY_DEV=("$SCREEN_H" "")
+APP_BY_DEV=("$APP_ID" "")
+ACTIVITY_BY_DEV=("$ACTIVITY" "")
+# Points the cursor at device 1 and exports the DEMO_* context exec steps read.
+use_device 1
 
 STEP_COUNT="$(jq 'length' "$STEPS_FILE")"
 echo "==> ${STEP_COUNT} top-level steps from $(basename "$STEPS_FILE"), device $SERIAL (${ACTIVITY})"
