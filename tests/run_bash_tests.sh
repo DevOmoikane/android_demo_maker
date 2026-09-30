@@ -172,10 +172,12 @@ expect_grep "phase-4 concat forces cfr frame rate" "$DEMO" "-fps_mode cfr"
 expect_grep "phase-4 concat normalizes to 30fps" "$DEMO" "fps=30"
 expect_grep "phase-4 concat forces keyframes" "$DEMO" "keyint_min 30"
 expect_grep "TIGHT pacing is configurable" "$DEMO" "TIGHT_OPT"
-expect_grep "autorotate guard wired into demo" "$DEMO" "GUARD_AUTOROTATE"
-expect_grep "radio guard wired into demo inline exec" "$DEMO" "GUARD_RADIO_TOGGLE_USB_ONLY"
-expect_grep "type settle wired into demo inline maybe_type" "$DEMO" "TYPE_FOCUS_SETTLE_SECONDS"
-expect_grep "demo inline poll_bounds honors knobs" "$DEMO" "POLL_MAX_ATTEMPTS"
+# The demo driver sources the library, so these guards are checked where they
+# now live rather than against a copy that no longer exists in the demo.
+expect_grep "autorotate guard wired into the shared library" "$LIB" "GUARD_AUTOROTATE"
+expect_grep "radio guard wired into the shared library" "$LIB" "GUARD_RADIO_TOGGLE_USB_ONLY"
+expect_grep "type settle wired into the shared library" "$LIB" "TYPE_FOCUS_SETTLE_SECONDS"
+expect_grep "shared library poll_bounds honors knobs" "$LIB" "POLL_MAX_ATTEMPTS"
 expect_grep "spec-test snapshots auto-rotate before steps" "$SPEC" "autorotate_snapshot"
 expect_grep "spec-test restores auto-rotate on exit" "$SPEC" "autorotate_restore; rm -rf"
 
