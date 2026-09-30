@@ -341,6 +341,30 @@ class SpecScenarioTests(unittest.TestCase):
             self.assertNotIn("narration", names)
             self.assertIn("settle_ms", names)
 
+    def test_every_spec_action_has_a_device_field(self):
+        # SPEC_ACTIONS is built in two parts, copied from steps.ACTIONS and
+        # then extended with actions defined only in spec.py. Both parts must
+        # end up with the field, and exactly once, or the editor draws two
+        # device dropdowns.
+        for action, meta in spec.SPEC_ACTIONS.items():
+            names = [f["name"] for f in meta["fields"]]
+            self.assertEqual(1, names.count("device"),
+                             "%s needs exactly one device field" % action)
+
+    def test_spec_only_action_validates_device(self):
+        # assert_contains is defined in spec.py, so it never passed through the
+        # common-field loop in steps.py. It must still reject a bad device.
+        def scenario(device):
+            return [{"name": "s", "steps": [
+                {"action": "assert_contains", "text": "x",
+                 "device": device}]}]
+
+        self.assertEqual([], spec.validate_doc(scenario(2)))
+        for bad in (0, 3, 99):
+            errors = spec.validate_doc(scenario(bad))
+            self.assertTrue(errors, "device=%r should be rejected" % (bad,))
+            self.assertIn("device", errors[0]["message"])
+
     def test_validate_doc_flags_bad_entries_with_index(self):
         good = [{"action": "back"}]
         path = self.write("doc.json", [

@@ -97,11 +97,20 @@ SPEC_ACTIONS.update({
 })
 
 # The runner honors settle_ms on every step; make it editable everywhere.
+# Device needs the same treatment. SPEC_ACTIONS is built in two parts: copied
+# from steps.ACTIONS, which already picked up the shared device field, then
+# extended by the block above, whose actions never passed through that loop.
+# Attach it here too or those actions accept any value silently and the editor
+# draws no field to fix it with. Reuse the spec object from steps rather than
+# rebuilding it: this file's own _f takes no options, so a local copy would
+# lose the ["1", "2"] that validation checks against.
 for _spec_action in SPEC_ACTIONS.values():
     if all(f["name"] != "settle_ms" for f in _spec_action["fields"]):
         _spec_action["fields"].append(
             _f("settle_ms", "int",
                help_text="ms to wait after this step before the next one"))
+    if all(f["name"] != "device" for f in _spec_action["fields"]):
+        _spec_action["fields"].append(steps_mod._DEVICE_FIELD)
 
 
 class SpecError(Exception):
