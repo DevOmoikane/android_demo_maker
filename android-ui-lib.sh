@@ -197,7 +197,9 @@ find_and_tap_left_of_contains() {
 # find_and_swipe_up_from_contains <substring> <delta_y> [nth] - scrolls a
 # clipped scroll container by swiping up starting from a text label's own
 # position, so the swipe still lands inside the scrollable area even if the
-# form's layout shifts.
+# form's layout shifts. Needed because dismiss_keyboard alone can leave lower
+# fields (e.g. a checkbox below the fold) clipped out of view with no error;
+# a tap at a fixed coordinate then silently misses.
 find_and_swipe_up_from_contains() {
   find_and_swipe_direction "$1" up "${2:-500}" "${3:-1}"
 }

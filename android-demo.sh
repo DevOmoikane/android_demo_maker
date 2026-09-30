@@ -337,8 +337,9 @@ WORKDIR="$(mktemp -d /tmp/android-demo-XXXXXX)"
 # evaluation, device hygiene) live in android-ui-lib.sh, shared with
 # android-spec-test.sh so both drive the UI the exact same way. This file
 # only adds what is specific to a narrated recording: the beat clock, the
-# screenrecord segment pump, and the TTS pipeline. The library needs ADB(),
-# WORKDIR and SCREEN_W/SCREEN_H (all defined above) and nothing else.
+# screenrecord segment pump, and the TTS pipeline. The library reads ADB(),
+# WORKDIR and SCREEN_W/SCREEN_H when its functions run, never at source time:
+# ADB() and WORKDIR are set above, the screen size just below.
 source "${SCRIPT_DIR}/android-ui-lib.sh"
 
 # ---------------------------------------------------------------- device hygiene

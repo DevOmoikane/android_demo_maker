@@ -178,6 +178,7 @@ expect_grep "autorotate guard wired into the shared library" "$LIB" "GUARD_AUTOR
 expect_grep "radio guard wired into the shared library" "$LIB" "GUARD_RADIO_TOGGLE_USB_ONLY"
 expect_grep "type settle wired into the shared library" "$LIB" "TYPE_FOCUS_SETTLE_SECONDS"
 expect_grep "shared library poll_bounds honors knobs" "$LIB" "POLL_MAX_ATTEMPTS"
+expect_grep "demo sources the shared library" "$DEMO" 'source "${SCRIPT_DIR}/android-ui-lib.sh"'
 expect_grep "spec-test snapshots auto-rotate before steps" "$SPEC" "autorotate_snapshot"
 expect_grep "spec-test restores auto-rotate on exit" "$SPEC" "autorotate_restore; rm -rf"
 
