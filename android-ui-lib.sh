@@ -368,6 +368,12 @@ maybe_type() {
   raw="$(jq -r '.type // empty' <<<"$step")"
   [ -n "$raw" ] || return 0
   value="$(substitute_templates "$raw")" || return 1
+  # Compose takes a frame or two to move focus into the field the tap just hit,
+  # and `input text` sent inside that window loses its first character
+  # (observed on a Pixel 6 Pro: the login email field received "srael+..." for
+  # "israel+...", so the whole scenario failed on a bogus login error). One
+  # short settle here covers every caller (tap_text/tap_contains/tap_desc/tap_xy).
+  sleep "${TYPE_FOCUS_SETTLE_SECONDS:-0.4}"
   ADB shell input text "$value"
 }
 
@@ -451,6 +457,46 @@ screen_condition_met() {
   done
 }
 
+# ---------------------------------------------------------------- device hygiene
+#
+# Auto-rotate belongs to whoever owns the device, not to a test run. `adb shell
+# monkey -p <pkg> -c android.intent.category.LAUNCHER 1` turns it ON and never
+# puts it back (monkey thaws rotation during its own setup), which is how it
+# kept coming back on after a session. Confirmed on a Pixel 6 Pro, 2026-08-28:
+# accelerometer_rotation 0 -> 1 on every monkey launch, unchanged by
+# `am start -n`, `adb install`, `pm clear` and `uiautomator dump`. Nothing here
+# launches with monkey; these two functions catch anything else that moves the
+# setting.
+
+AUTOROTATE_AT_START=""
+
+# Reads the setting so autorotate_restore can put it back. No-op when the guard
+# is turned off, or when the device answers something other than 0/1 (an
+# emulator can).
+autorotate_snapshot() {
+  [ "${GUARD_AUTOROTATE:-true}" = "true" ] || return 0
+  AUTOROTATE_AT_START="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+  case "$AUTOROTATE_AT_START" in 0|1) ;; *) AUTOROTATE_AT_START="" ;; esac
+}
+
+# Puts the setting back if the run moved it, and says so: a silent restore
+# would hide the next tool that starts flipping it.
+autorotate_restore() {
+  [ -n "$AUTOROTATE_AT_START" ] || return 0
+  local now
+  now="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+  [ "$now" = "$AUTOROTATE_AT_START" ] && return 0
+  ADB shell settings put system accelerometer_rotation "$AUTOROTATE_AT_START" >/dev/null 2>&1
+  echo "==> auto-rotate had been changed during this run ($AUTOROTATE_AT_START -> $now); restored to $AUTOROTATE_AT_START" >&2
+}
+
+# True when the device is attached over USB. Radio toggles are refused
+# otherwise: on wireless debugging, disabling wifi cuts adb's own transport and
+# the device is left unreachable with its radios off.
+device_is_usb() {
+  adb devices -l | awk -v s="$SERIAL" '$1 == s' | grep -q ' usb:'
+}
+
 # do_exec_step <exec-step> - runs the step's external command synchronously
 # and remembers its exit status + stdout in LAST_EXEC_STATUS /
 # LAST_EXEC_OUTPUT for a following if step (source last_command). on_fail
@@ -470,6 +516,14 @@ do_exec_step() {
   cmd="$(jq -r '.command // empty' <<<"$step")"
   [ -n "$cmd" ] || { echo "ERROR: exec step is missing \"command\"" >&2; return 2; }
   cmd="$(substitute_templates "$cmd")" || return 2
+  if [ "${GUARD_RADIO_TOGGLE_USB_ONLY:-true}" = "true" ] &&
+     printf '%s' "$cmd" | grep -Eq 'svc +(wifi|data) +disable' &&
+     ! device_is_usb; then
+    echo "ERROR: this exec step turns a radio off, and $SERIAL is not on USB." >&2
+    echo "       Over wireless debugging that kills adb's own transport mid-run and leaves" >&2
+    echo "       the device offline with no way back in. Attach it by USB and re-run." >&2
+    return 1
+  fi
   echo "   \$ exec (${shell}): $(printf '%s' "$cmd" | head -1)"
   case "$shell" in
     bash)   out="$(printf '%s' "$cmd" | bash 2>&1)" || status=$? ;;

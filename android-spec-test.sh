@@ -200,12 +200,18 @@ else
 fi
 
 WORKDIR="$(mktemp -d /tmp/android-spec-test-XXXXXX)"
-trap 'rm -rf "$WORKDIR"' EXIT
+# Guarded: this trap runs even if an early exit happens before android-ui-lib.sh
+# is sourced, so only call autorotate_restore when it exists.
+trap 'command -v autorotate_restore >/dev/null 2>&1 && autorotate_restore; rm -rf "$WORKDIR"' EXIT
 read -r SCREEN_W SCREEN_H < <(ADB shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
 SCREEN_W="${SCREEN_W:-1080}"
 SCREEN_H="${SCREEN_H:-2400}"
 
 source "${SCRIPT_DIR}/android-ui-lib.sh"
+
+# Auto-rotate is the device owner's setting, not this run's. Snapshot it before
+# any step can move it; the EXIT trap above puts it back.
+autorotate_snapshot
 
 # Context exported to exec-step commands (and visible as $ENV in lambda),
 # same names as the general android_demo_maker tool uses.

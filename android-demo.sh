@@ -40,6 +40,7 @@
 #   ./android-demo.sh --dry-run                       # just drive the UI with short fixed pauses, no recording or narration: for testing step targets
 #   ./android-demo.sh --no-narration                  # record video only, silent, skip all TTS/audio work
 #   ./android-demo.sh --keep-workdir                  # don't delete the temp working directory (per-step audio/video) when done
+#   ./android-demo.sh --loose                         # restore the old spaced-out pacing; default packs narration against the action
 #
 # Requires on this machine: adb, jq, and a TTS engine: local Piper neural
 # TTS (the default; https://github.com/rhasspy/piper, noticeably more
@@ -227,6 +228,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --no-narration) NO_NARRATION=1 ;;
     --keep-workdir) KEEP_WORKDIR=1 ;;
+    --loose) TIGHT_OPT=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -331,6 +333,33 @@ mkdir -p "$(dirname "$OUT")"
 
 WORKDIR="$(mktemp -d /tmp/android-demo-XXXXXX)"
 
+# ---------------------------------------------------------------- device hygiene
+# Auto-rotate belongs to whoever owns the device, not to this run. `adb shell
+# monkey -p <pkg> -c android.intent.category.LAUNCHER 1` turns it ON and never
+# puts it back (monkey thaws rotation during its own setup). Snapshot the
+# setting before any step can move it and restore it in cleanup().
+AUTOROTATE_AT_START=""
+autorotate_snapshot() {
+  [ "${GUARD_AUTOROTATE:-true}" = "true" ] || return 0
+  AUTOROTATE_AT_START="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+  case "$AUTOROTATE_AT_START" in 0|1) ;; *) AUTOROTATE_AT_START="" ;; esac
+}
+autorotate_restore() {
+  [ -n "$AUTOROTATE_AT_START" ] || return 0
+  local now
+  now="$(ADB shell settings get system accelerometer_rotation 2>/dev/null | tr -d '\r\n')"
+  [ "$now" = "$AUTOROTATE_AT_START" ] && return 0
+  ADB shell settings put system accelerometer_rotation "$AUTOROTATE_AT_START" >/dev/null 2>&1
+  echo "==> auto-rotate had been changed during this run ($AUTOROTATE_AT_START -> $now); restored to $AUTOROTATE_AT_START" >&2
+}
+# True when the device is attached over USB. Radio toggles are refused
+# otherwise: on wireless debugging, disabling wifi cuts adb's own transport and
+# the device is left unreachable with its radios off.
+device_is_usb() {
+  adb devices -l | awk -v s="$SERIAL" '$1 == s' | grep -q ' usb:'
+}
+autorotate_snapshot
+
 # Muted for the recording itself, not dry-run (no sound/video is captured there, and a
 # banner is harmless to a fixed-pause dry run). zen_mode 2 = total silence (blocks even
 # alarms); restored to whatever the device had before, not hardcoded back to 0, so a
@@ -342,6 +371,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 cleanup() {
+  command -v autorotate_restore >/dev/null 2>&1 && autorotate_restore
   if [ -n "$ORIGINAL_ZEN_MODE" ]; then
     ADB shell settings put global zen_mode "$ORIGINAL_ZEN_MODE" >/dev/null 2>&1 || true
   fi
@@ -388,19 +418,20 @@ center_from_bounds() {
 # inside a single element regardless of how the dump is laid out on disk.
 
 # poll_bounds <extractor-fn> <args...>: calls extractor-fn (which dumps the
-# UI and echoes bounds, or nothing) up to 10 times, 800ms apart (~8s). A step
-# right after a screen transition can fire before network-backed content
-# (child list, devices, balances, article lists, etc.) finishes loading --
-# this covers that race instead of every caller needing its own guess at
-# settle_ms. 8s comfortably covers occasional multi-second slow backend
-# responses, not just ordinary UI animation settle time.
+# UI and echoes bounds, or nothing) up to POLL_MAX_ATTEMPTS times (default 25),
+# POLL_INTERVAL_SECONDS apart (default 0.8s, so ~20s total). A step right after
+# a screen transition can fire before network-backed content (child list,
+# devices, balances, article lists, etc.) finishes loading: this covers that
+# race instead of every caller needing its own guess at settle_ms. Override the
+# two env vars for a call site that genuinely needs to outlast a slow real
+# backend response.
 poll_bounds() {
-  local fn="$1" bounds attempt
+  local fn="$1" bounds attempt max="${POLL_MAX_ATTEMPTS:-25}" interval="${POLL_INTERVAL_SECONDS:-0.8}"
   shift
-  for attempt in $(seq 1 25); do
+  for attempt in $(seq 1 "$max"); do
     bounds="$("$fn" "$@")"
     [ -n "$bounds" ] && { printf '%s' "$bounds"; return 0; }
-    sleep 0.8
+    sleep "$interval"
   done
   return 0
 }
@@ -733,6 +764,12 @@ maybe_type() {
   raw="$(jq -r '.type // empty' <<<"$step")"
   [ -n "$raw" ] || return 0
   value="$(substitute_templates "$raw")" || return 1
+  # Compose takes a frame or two to move focus into the field the tap just hit,
+  # and `input text` sent inside that window loses its first character
+  # (observed on a Pixel 6 Pro: the login email field received "srael+..." for
+  # "israel+...", so the whole scenario failed on a bogus login error). One
+  # short settle here covers every caller (tap_text/tap_contains/tap_desc/tap_xy).
+  sleep "${TYPE_FOCUS_SETTLE_SECONDS:-0.4}"
   ADB shell input text "$value"
 }
 
@@ -760,6 +797,14 @@ do_exec_step() {
   cmd="$(jq -r '.command // empty' <<<"$step")"
   [ -n "$cmd" ] || { echo "ERROR: exec step is missing \"command\"" >&2; return 2; }
   cmd="$(substitute_templates "$cmd")" || return 2
+  if [ "${GUARD_RADIO_TOGGLE_USB_ONLY:-true}" = "true" ] &&
+     printf '%s' "$cmd" | grep -Eq 'svc +(wifi|data) +disable' &&
+     ! device_is_usb; then
+    echo "ERROR: this exec step turns a radio off, and $SERIAL is not on USB." >&2
+    echo "       Over wireless debugging that kills adb's own transport mid-run and leaves" >&2
+    echo "       the device offline with no way back in. Attach it by USB and re-run." >&2
+    return 1
+  fi
   echo "   \$ exec (${shell}): $(printf '%s' "$cmd" | head -1)"
   case "$shell" in
     bash)   out="$(printf '%s' "$cmd" | bash 2>&1)" || status=$? ;;
@@ -1142,6 +1187,13 @@ stop_segment() {
 LEAF_SEED=0
 BEAT_SEED=0
 BEAT_PRE="0"
+# TIGHT packs the audio against the picture: no jitter pause before an action,
+# narration starting the instant the beat starts (so it plays over the screen
+# transition instead of after it), and a hair of tail. The old spaced-out
+# timing reads as dead air on a demo meant to be watched end to end. Opt back
+# into the old pacing with --loose (or TIGHT_OPT=0).
+TIGHT="${TIGHT_OPT:-${TIGHT:-1}}"
+TIGHT_TAIL="${TIGHT_TAIL:-0.15}"
 TIMELINE_ID=()
 TIMELINE_SETTLE=()
 TIMELINE_PRE=()
@@ -1154,8 +1206,12 @@ TIMELINE_HAS_NARR=()
 begin_beat() {
   BEAT_SEED="$LEAF_SEED"
   LEAF_SEED=$((LEAF_SEED + 1))
-  BEAT_PRE="$(awk -v seed="$BEAT_SEED" 'BEGIN{srand(seed+1); printf "%.2f", 0.4 + rand()*0.5}')"
-  sleep "$BEAT_PRE"
+  if [ "$TIGHT" = 1 ]; then
+    BEAT_PRE="0"
+  else
+    BEAT_PRE="$(awk -v seed="$BEAT_SEED" 'BEGIN{srand(seed+1); printf "%.2f", 0.4 + rand()*0.5}')"
+    sleep "$BEAT_PRE"
+  fi
 }
 
 # end_beat <id> <narration> <settle_s> <act>: hold the screen for settle +
@@ -1171,12 +1227,20 @@ end_beat() {
       speak_dur="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$narration_wav")"
     fi
   fi
-  if [ "${has_narr:-n}" = "y" ]; then
+  if [ "$TIGHT" = 1 ]; then
+    tail_pause="$TIGHT_TAIL"
+    # Speech already started at the top of the beat and has been running
+    # through the action, so only hold for whatever is left of it, never for
+    # its full length on top of the action time.
+    dwell="$(awk -v s="$settle_s" -v sp="$speak_dur" -v a="$act" -v t="$tail_pause" \
+      'BEGIN{r=sp-a; if (r<s) r=s; printf "%.2f", r+t}')"
+  elif [ "${has_narr:-n}" = "y" ]; then
     tail_pause="$(awk -v seed="$BEAT_SEED" 'BEGIN{srand(seed+7); printf "%.2f", 0.6 + rand()*0.7}')"
+    dwell="$(awk -v s="$settle_s" -v sp="$speak_dur" -v t="$tail_pause" 'BEGIN{printf "%.2f", s+sp+t}')"
   else
     tail_pause="$(awk -v seed="$BEAT_SEED" 'BEGIN{srand(seed+7); printf "%.2f", 1.0 + rand()}')"
+    dwell="$(awk -v s="$settle_s" -v sp="$speak_dur" -v t="$tail_pause" 'BEGIN{printf "%.2f", s+sp+t}')"
   fi
-  dwell="$(awk -v s="$settle_s" -v sp="$speak_dur" -v t="$tail_pause" 'BEGIN{printf "%.2f", s+sp+t}')"
   sleep "$dwell"
 
   TIMELINE_ID+=("$id")
@@ -1282,7 +1346,11 @@ if [ "$NO_NARRATION" -eq 0 ]; then
     settle_s="${TIMELINE_SETTLE[$i]}"
     pre="${TIMELINE_PRE[$i]}"
     act="${TIMELINE_ACT[$i]}"
-    lead_s="$(awk -v a="$pre" -v b="$settle_s" -v c="$act" 'BEGIN{printf "%.3f", a+b+c}')"
+    if [ "$TIGHT" = 1 ]; then
+      lead_s="$pre"
+    else
+      lead_s="$(awk -v a="$pre" -v b="$settle_s" -v c="$act" 'BEGIN{printf "%.3f", a+b+c}')"
+    fi
     tag="$(narr_id_to_file "${TIMELINE_ID[$i]}")"
 
     narration_wav=""
@@ -1295,7 +1363,11 @@ if [ "$NO_NARRATION" -eq 0 ]; then
       narration_wav=""
       speak_dur="0"
     fi
-    tail_s="$(awk -v d="${TIMELINE_DWELL[$i]}" -v s="$settle_s" -v sp="$speak_dur" 'BEGIN{v=d-s-sp; if (v<0) v=0; printf "%.3f", v}')"
+    # Whatever of the beat's own wall time the lead and the speech did not use.
+    # Same formula in both modes, so the audio track stays exactly as long as
+    # the video no matter how the dwell was chosen.
+    tail_s="$(awk -v p="$pre" -v a="$act" -v d="${TIMELINE_DWELL[$i]}" -v l="$lead_s" -v sp="$speak_dur" \
+      'BEGIN{v=p+a+d-l-sp; if (v<0) v=0; printf "%.3f", v}')"
 
     lead_wav="$WORKDIR/audio/lead_${tag}.wav"
     tail_wav="$WORKDIR/audio/tail_${tag}.wav"
@@ -1334,7 +1406,19 @@ for s in $(seq 0 $((SEG_COUNT - 1))); do
   filter="${filter}[${s}:v]"
 done
 filter="${filter}concat=n=${SEG_COUNT}:v=1:a=0[outv]"
-ffmpeg -y -loglevel error "${args[@]}" -filter_complex "$filter" -map "[outv]" -c:v libx264 -preset veryfast -crf 20 "$WORKDIR/video/combined.mp4"
+# Normalise the frame rate on the way out of the concat. screenrecord emits
+# variable-rate frames with duplicate DTS, and h264 written straight from them
+# lands its first keyframe tens of seconds in. Players then show the opening as
+# smeared blocks until the second keyframe arrives. Normalising to a constant
+# rate and forcing a keyframe every 2s fixes the start, and costs nothing
+# anywhere else. sc_threshold=0 keeps the interval regular rather than letting
+# x264 place keyframes on scene cuts, which a screen recording has few of.
+filter="${filter//\[outv\]/[outvraw]}"
+filter="${filter};[outvraw]fps=30,format=yuv420p[outv]"
+ffmpeg -y -loglevel error "${args[@]}" -filter_complex "$filter" -map "[outv]" \
+  -fps_mode cfr -c:v libx264 -preset veryfast -crf 20 \
+  -g 60 -keyint_min 30 -sc_threshold 0 \
+  "$WORKDIR/video/combined.mp4"
 VIDEO="$WORKDIR/video/combined.mp4"
 
 # ---- Phase 5: mux narration onto the video ---------------------------------

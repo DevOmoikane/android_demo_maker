@@ -51,7 +51,8 @@ android-spec-tests/  example scenario file (point the Spec Tests tab here
 setup.sh / run.sh    bootstrap and launcher
 demo_maker/          stdlib-only backend package
 web/                 static frontend (vanilla JS)
-tests/               unittest suite: .venv/bin/python -m unittest discover -s tests
+tests/               unittest suite for the backend (python -m unittest discover -s tests)
+                     plus tests/run_bash_tests.sh for the shell drivers/ui-lib logic
 example-steps.json   sample tour exercising most actions
 piper-voices/        Piper models used by --tts piper
 ```
