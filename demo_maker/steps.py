@@ -164,11 +164,25 @@ ACTIONS: Dict[str, dict] = {
 _NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
 _INT_RE = re.compile(r"^-?\d+$")
 
+# Device applies to every action, attached here alongside narration so the
+# editor forms always offer it. A select rather than a plain int so the editor
+# renders a dropdown and validation rejects anything but 1 or 2. Omitting it
+# means device 1, with no inheritance from earlier steps, so a step reads the
+# same wherever it sits in the file.
+_DEVICE_FIELD = _f("device", "select", False, None,
+                   options=["1", "2"],
+                   help_text="which device this step runs on; 1 is the main "
+                             "phone, 2 the second phone or emulator. An if "
+                             "step reading last_command must name the same "
+                             "device as the exec step it follows, since each "
+                             "device keeps its own exec output.")
+
 # Narration applies to every action; attach it once here so the editor forms
 # always offer it (the spec registry strips the narration field, since spec
 # runs never speak).
 for _action in ACTIONS.values():
     _action["fields"].extend(_NARRATION)
+    _action["fields"].append(_DEVICE_FIELD)
 
 
 def _given(value) -> bool:

@@ -120,6 +120,28 @@ class StepsValidationTests(unittest.TestCase):
                        "drag_and_drop"):
             self.assertIn(action, spec.SPEC_ACTIONS)
 
+    def test_device_field_accepted(self):
+        for value in (1, 2, "1", "2"):
+            errors = steps.validate_steps(
+                [{"action": "tap_text", "text": "Chats", "device": value}])
+            self.assertEqual([], errors, "device=%r should validate" % (value,))
+
+    def test_device_field_rejects_out_of_range(self):
+        for value in (0, 3, -1, "two", 1.5):
+            errors = steps.validate_steps(
+                [{"action": "tap_text", "text": "Chats", "device": value}])
+            self.assertTrue(errors, "device=%r should be rejected" % (value,))
+            self.assertIn("device", errors[0]["message"])
+
+    def test_device_absent_means_device_one(self):
+        self.assertEqual([], steps.validate_steps([{"action": "launch"}]))
+
+    def test_spec_registry_also_accepts_device(self):
+        errors = spec.validate_doc(
+            [{"name": "s", "steps": [{"action": "tap_text", "text": "x",
+                                      "device": 2}]}])
+        self.assertEqual([], errors)
+
 
 class TtsParsingTests(unittest.TestCase):
     FIXTURE = (
