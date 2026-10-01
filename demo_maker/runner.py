@@ -138,6 +138,13 @@ def build_argv(settings: dict, mode: str = "normal"):
     if not serial:
         errors.append("no device selected")
 
+    if settings.get("second_device"):
+        serial_2 = str(settings.get("serial_2") or "").strip()
+        if not serial_2:
+            errors.append("second device enabled but no second serial selected")
+        elif serial_2 == serial:
+            errors.append("second device is the same device as the main one")
+
     if errors:
         return [], errors
 
@@ -145,6 +152,15 @@ def build_argv(settings: dict, mode: str = "normal"):
     activity = str(settings.get("activity") or "").strip()
     if activity:
         argv += ["--activity", activity]
+    if settings.get("second_device"):
+        # --app-id-2 and --activity-2 fall back to the primary, so the common
+        # "same app on a phone and an emulator" case needs only a second serial.
+        argv += ["--serial-2", str(settings.get("serial_2") or "").strip(),
+                 "--app-id-2",
+                 str(settings.get("app_id_2") or "").strip() or app_id]
+        activity_2 = str(settings.get("activity_2") or "").strip() or activity
+        if activity_2:
+            argv += ["--activity-2", activity_2]
     argv += ["--steps", steps]
 
     engine = settings.get("engine") or "piper"
@@ -183,6 +199,12 @@ def build_argv(settings: dict, mode: str = "normal"):
 
     segment = int(settings.get("segment_seconds") or 150)
     argv += ["--segment-seconds", str(max(10, segment))]
+
+    if settings.get("second_device"):
+        # The composite is the only thing --compose-height sizes, and only a
+        # second device produces one.
+        height = int(settings.get("compose_height") or 1080)
+        argv += ["--compose-height", str(max(240, height))]
 
     if mode == "dry":
         argv.append("--dry-run")

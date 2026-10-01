@@ -309,6 +309,51 @@ class CommandBuilderTests(unittest.TestCase):
         settings = self.base_settings(keep_workdir=True)
         self.assertIn("--keep-workdir", " ".join(self.argv_for(settings)[0]))
 
+    def test_second_device_off_emits_nothing(self):
+        argv, errors = self.argv_for(self.base_settings(), "dry")
+        self.assertEqual([], errors)
+        joined = " ".join(argv)
+        for flag in ("--serial-2", "--app-id-2", "--activity-2",
+                     "--compose-height"):
+            self.assertNotIn(flag, joined)
+
+    def test_second_device_on_emits_flags(self):
+        argv, errors = self.argv_for(self.base_settings(
+            second_device=True, serial_2="SER2",
+            app_id_2="com.other.app", activity_2="com.other.app/.MainActivity",
+            compose_height=1440), "dry")
+        self.assertEqual([], errors)
+        joined = " ".join(argv)
+        self.assertIn("--serial-2 SER2", joined)
+        self.assertIn("--app-id-2 com.other.app", joined)
+        self.assertIn("--activity-2 com.other.app/.MainActivity", joined)
+        self.assertIn("--compose-height 1440", joined)
+
+    def test_second_device_app_defaults_to_primary(self):
+        argv, errors = self.argv_for(self.base_settings(
+            second_device=True, serial_2="SER2"), "dry")
+        self.assertEqual([], errors)
+        joined = " ".join(argv)
+        self.assertIn("--app-id-2 com.example.app", joined)
+        self.assertIn("--serial SER1 --serial-2 SER2", joined)
+
+    def test_second_device_activity_defaults_to_primary(self):
+        argv, _ = self.argv_for(self.base_settings(
+            second_device=True, serial_2="SER2",
+            activity="com.example.app/.MainActivity"), "dry")
+        self.assertIn("--activity-2 com.example.app/.MainActivity",
+                      " ".join(argv))
+
+    def test_second_device_requires_a_serial(self):
+        _, errors = self.argv_for(self.base_settings(
+            second_device=True, serial_2=""), "dry")
+        self.assertTrue(any("second device" in e for e in errors), errors)
+
+    def test_second_device_rejects_the_same_serial(self):
+        _, errors = self.argv_for(self.base_settings(
+            second_device=True, serial_2="SER1"), "dry")
+        self.assertTrue(any("same device" in e for e in errors), errors)
+
 
 class SpecScenarioTests(unittest.TestCase):
     def setUp(self):
@@ -496,6 +541,40 @@ class SpecScenarioTests(unittest.TestCase):
             spec_scenarios_dir="/gone"))
         self.assertEqual(4, len(errors))
 
+    def test_spec_argv_second_device_off_emits_nothing(self):
+        argv, errors = spec.build_spec_argv(self.base_settings())
+        self.assertEqual([], errors)
+        joined = " ".join(argv)
+        for flag in ("--serial-2", "--app-id-2", "--activity-2"):
+            self.assertNotIn(flag, joined)
+
+    def test_spec_argv_second_device_on(self):
+        argv, errors = spec.build_spec_argv(self.base_settings(
+            second_device=True, serial_2="SER2"))
+        self.assertEqual([], errors)
+        joined = " ".join(argv)
+        self.assertIn("--serial-2 SER2", joined)
+        self.assertIn("--app-id-2 com.example.app", joined)
+        # spec runs record nothing, so there is no composite to size
+        self.assertNotIn("--compose-height", joined)
+
+    def test_spec_argv_second_device_activity_defaults_to_primary(self):
+        argv, errors = spec.build_spec_argv(self.base_settings(
+            second_device=True, serial_2="SER2",
+            spec_activity="com.example.app/.Main"))
+        self.assertEqual([], errors)
+        self.assertIn("--activity-2 com.example.app/.Main", " ".join(argv))
+
+    def test_spec_argv_second_device_requires_a_serial(self):
+        _, errors = spec.build_spec_argv(self.base_settings(
+            second_device=True, serial_2=""))
+        self.assertTrue(any("second device" in e for e in errors), errors)
+
+    def test_spec_argv_second_device_rejects_the_same_serial(self):
+        _, errors = spec.build_spec_argv(self.base_settings(
+            second_device=True, serial_2="SER1"))
+        self.assertTrue(any("same device" in e for e in errors), errors)
+
 
 class PiperCatalogTests(unittest.TestCase):
     def setUp(self):
@@ -615,6 +694,32 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual("all", updated["scope"])
         self.assertNotIn("hacker_key", updated)
         config.update_settings({"scope": "user", "engine": "say"})
+
+    def test_second_device_keys_survive_a_round_trip(self):
+        # The studio cannot send a key DEFAULTS has never heard of, and one
+        # left out of the type classes comes back as a string, so cover both
+        # halves: the keys persist, and they persist with their own types.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_file = config.SETTINGS_FILE
+            config.SETTINGS_FILE = Path(tmp) / "settings.json"
+            try:
+                config.update_settings({
+                    "second_device": True,
+                    "serial_2": "SER2",
+                    "app_id_2": "com.other.app",
+                    "activity_2": "com.other.app/.MainActivity",
+                    "compose_height": 1440,
+                })
+                loaded = config.load_settings()
+            finally:
+                config.SETTINGS_FILE = orig_file
+        self.assertIs(True, loaded["second_device"])
+        self.assertEqual("SER2", loaded["serial_2"])
+        self.assertEqual("com.other.app", loaded["app_id_2"])
+        self.assertEqual("com.other.app/.MainActivity", loaded["activity_2"])
+        self.assertEqual(1440, loaded["compose_height"])
+        self.assertIsInstance(loaded["compose_height"], int)
+        self.assertNotIsInstance(loaded["compose_height"], bool)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,11 @@ DEFAULTS: Dict[str, object] = {
     "piper_model": "",
     "piper_bin": "",
     "serial": "",
+    "second_device": False,
+    "serial_2": "",
+    "app_id_2": "",
+    "activity_2": "",
+    "compose_height": 1080,
     "app_id": "",
     "activity": "",
     "scope": "user",
@@ -56,8 +61,8 @@ DEFAULTS: Dict[str, object] = {
     "recents": [],
 }
 
-_BOOL_KEYS = {"keep_workdir", "no_narration"}
-_INT_KEYS = {"segment_seconds"}
+_BOOL_KEYS = {"keep_workdir", "no_narration", "second_device"}
+_INT_KEYS = {"segment_seconds", "compose_height"}
 _LIST_KEYS = {"recents"}
 
 

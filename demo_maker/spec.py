@@ -251,6 +251,13 @@ def build_spec_argv(settings: dict, target: Optional[str] = None,
     if not serial:
         errors.append("no device selected")
 
+    if settings.get("second_device"):
+        serial_2 = str(settings.get("serial_2") or "").strip()
+        if not serial_2:
+            errors.append("second device enabled but no second serial selected")
+        elif serial_2 == serial:
+            errors.append("second device is the same device as the main one")
+
     where = str(target if target is not None
                 else settings.get("spec_scenarios_dir") or "").strip()
     if not where or not Path(where).expanduser().exists():
@@ -266,6 +273,16 @@ def build_spec_argv(settings: dict, target: Optional[str] = None,
     activity = str(settings.get("spec_activity") or "").strip()
     if activity:
         argv += ["--activity", activity]
+    if settings.get("second_device"):
+        # --app-id-2 and --activity-2 fall back to the primary, as in
+        # runner.build_argv. No --compose-height here: spec runs record
+        # nothing, so there is no composite to size.
+        argv += ["--serial-2", str(settings.get("serial_2") or "").strip(),
+                 "--app-id-2",
+                 str(settings.get("app_id_2") or "").strip() or app_id]
+        activity_2 = str(settings.get("activity_2") or "").strip() or activity
+        if activity_2:
+            argv += ["--activity-2", activity_2]
     if only:
         argv += ["--only", only]
     if report_path:
