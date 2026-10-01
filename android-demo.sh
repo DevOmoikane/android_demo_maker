@@ -392,6 +392,7 @@ WORKDIR="$(mktemp -d /tmp/android-demo-XXXXXX)"
 # reads WORKDIR and SCREEN_W/SCREEN_H when its functions run, never at source
 # time: WORKDIR is set above, the screen size just below.
 source "${SCRIPT_DIR}/android-ui-lib.sh"
+source "${SCRIPT_DIR}/android-compose-lib.sh"
 
 # ---------------------------------------------------------------- device hygiene
 # Auto-rotate belongs to whoever owns the device, not to this run. `adb shell
@@ -1082,12 +1083,12 @@ fi
 SEG_COUNT=$((SEG_INDEX + 1))
 echo "==> Normalizing ${SEG_COUNT} recording segment$([ "$SEG_COUNT" -gt 1 ] && echo s)"
 args=()
-filter=""
 for s in $(seq 0 $((SEG_COUNT - 1))); do
-  args+=(-i "$(segment_path 1 "$s")")
-  filter="${filter}[${s}:v]"
+  for d in $(seq 1 "$DEVICE_COUNT"); do
+    args+=(-i "$(segment_path "$d" "$s")")
+  done
 done
-filter="${filter}concat=n=${SEG_COUNT}:v=1:a=0[outv]"
+filter="$(build_concat_filter "$SEG_COUNT")"
 # Normalise the frame rate on the way out of the concat. screenrecord emits
 # variable-rate frames with duplicate DTS, and h264 written straight from them
 # lands its first keyframe tens of seconds in. Players then show the opening as
@@ -1095,8 +1096,6 @@ filter="${filter}concat=n=${SEG_COUNT}:v=1:a=0[outv]"
 # rate and forcing a keyframe every 2s fixes the start, and costs nothing
 # anywhere else. sc_threshold=0 keeps the interval regular rather than letting
 # x264 place keyframes on scene cuts, which a screen recording has few of.
-filter="${filter//\[outv\]/[outvraw]}"
-filter="${filter};[outvraw]fps=30,format=yuv420p[outv]"
 ffmpeg -y -loglevel error "${args[@]}" -filter_complex "$filter" -map "[outv]" \
   -fps_mode cfr -c:v libx264 -preset veryfast -crf 20 \
   -g 60 -keyint_min 30 -sc_threshold 0 \

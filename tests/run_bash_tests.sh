@@ -68,7 +68,7 @@ expect_no_grep() { # expect_no_grep <desc> <file> <fixed-pattern>
 }
 
 # ---------------------------------------------------------------- syntax
-for f in "$DEMO" "$SPEC" "$LIB"; do
+for f in "$DEMO" "$SPEC" "$LIB" "$ROOT/android-compose-lib.sh"; do
   if bash -n "$f"; then note "bash -n parses $(basename "$f")"; else bail "bash -n failed on $(basename "$f")"; fi
 done
 
@@ -310,6 +310,78 @@ expect "poll_bounds sleeps between attempts" "${#SLEPT[@]}" "3"
 rm -f "$COUNTER_FILE"
 unset POLL_MAX_ATTEMPTS POLL_INTERVAL_SECONDS
 
+# ---------------------------------------------------------------- compositing
+# Sourced directly: the composing functions are pure and touch no device, which
+# is the whole reason they live in their own file.
+COMPOSE_HEIGHT=1080
+# shellcheck source=/dev/null
+. "$ROOT/android-compose-lib.sh"
+
+DEVICE_COUNT=1
+expect "single device filter is unchanged" \
+  "$(build_concat_filter 3)" \
+  "[0:v][1:v][2:v]concat=n=3:v=1:a=0[outvraw];[outvraw]fps=30,format=yuv420p[outv]"
+expect "single device, single segment" \
+  "$(build_concat_filter 1)" \
+  "[0:v]concat=n=1:v=1:a=0[outvraw];[outvraw]fps=30,format=yuv420p[outv]"
+
+DEVICE_COUNT=2
+SCREEN_W_BY_DEV=(1080 1080)
+SCREEN_H_BY_DEV=(2400 2400)
+geom() { build_compose_geometry "$1"; printf '%s x %s' "$COMPOSE_W" "$COMPOSE_H"; }
+expect "two 1080x2400 panes at 1080" "$(geom 1080)" "972 x 1080"
+
+SCREEN_W_BY_DEV=(1440 1440)
+SCREEN_H_BY_DEV=(2560 2560)
+expect "a fractional pane width rounds up to even" "$(geom 1080)" "1216 x 1080"
+expect "an odd height rounds down to even" \
+  "$(build_compose_geometry 1081; printf '%s' "$COMPOSE_H")" "1080"
+expect "an absurd height is floored" \
+  "$(build_compose_geometry 4; printf '%s' "$COMPOSE_H")" "16"
+
+SCREEN_W_BY_DEV=(1080 1080)
+SCREEN_H_BY_DEV=(2400 2400)
+COMPOSE_HEIGHT=1080
+f2="$(build_concat_filter 2)"
+expect "two devices build two hstacks" \
+  "$(printf '%s' "$f2" | grep -o 'hstack=inputs=2' | wc -l | tr -d ' ')" "2"
+expect "inputs are ordered segment-major" \
+  "$(printf '%s' "$f2" | grep -o '\[[0-9]:v\]' | tr -d '\n')" "[0:v][1:v][2:v][3:v]"
+# ffmpeg names a filter chain's output with a label on its trailing side, so the
+# pane is `[<input>]scale=<pane_w>:<h>...[s<s>d<d>]`. The input index is what
+# pins the pane to a device, and it is segment-major, so [0:v] is segment 0
+# device 1 and [1:v] is segment 0 device 2.
+expect_contains "device 1 pane is scaled to its width" "$f2" \
+  "[0:v]scale=486:1080:force_original_aspect_ratio=decrease,pad=486:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS,fps=30[s0d1]"
+expect_contains "device 2 pane is scaled to its width" "$f2" \
+  "[1:v]scale=486:1080:force_original_aspect_ratio=decrease,pad=486:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS,fps=30[s0d2]"
+expect_contains "hstack joins the two panes" "$f2" "[s0d1][s0d2]hstack=inputs=2[s0h]"
+# Chains are separated by semicolons and a label names a chain's output rather
+# than starting the next chain, so the graph must read segment 0's stack, then
+# segment 1's. Counting separators catches a missing one, which ffmpeg rejects
+# outright with "trailing garbage after a filter".
+# 2 segments x 2 panes + 2 hstacks + 1 concat + 1 outv, less the leading one.
+expect "every chain is semicolon separated" \
+  "$(printf '%s' "$f2" | tr -cd ';' | wc -c | tr -d ' ')" "7"
+expect_contains "panes are concat in order" "$f2" "[s0h][s1h]concat=n=2:v=1:a=0[outvraw]"
+expect_contains "trailing normalization" "$f2" "[outvraw]fps=30,format=yuv420p[outv]"
+expect "every stream is rebased" \
+  "$(printf '%s' "$f2" | grep -o 'setpts=PTS-STARTPTS' | wc -l | tr -d ' ')" "4"
+expect "no padding filter is emitted" \
+  "$(printf '%s' "$f2" | grep -c 'tpad' || true)" "0"
+
+SCREEN_W_BY_DEV=(1080 720)
+SCREEN_H_BY_DEV=(2400 1600)
+expect "mismatched aspects get different pane widths" \
+  "$(printf '%s' "$(build_concat_filter 1)" | grep -o 'scale=[0-9]*:1080' | tr '\n' ' ')" \
+  "scale=486:1080 scale=486:1080 "
+
+SCREEN_W_BY_DEV=(1080 1920)
+SCREEN_H_BY_DEV=(2400 1080)
+expect "a landscape second device gets its own pane width" \
+  "$(printf '%s' "$(build_concat_filter 1)" | grep -o 'scale=[0-9]*:1080' | tr '\n' ' ')" \
+  "scale=486:1080 scale=1920:1080 "
+
 # ---------------------------------------------------------------- demo driver smoke
 help_out="$("$DEMO" --help 2>&1)"
 expect_contains "--loose is documented in --help" "$help_out" "--loose"
@@ -318,7 +390,10 @@ rc=0
 expect "--loose is accepted by the parser" "$rc" "0"
 
 expect_grep "phase-4 concat forces cfr frame rate" "$DEMO" "-fps_mode cfr"
-expect_grep "phase-4 concat normalizes to 30fps" "$DEMO" "fps=30"
+# The concat's trailing fps=30 lives in the compositing library now that the
+# graph is built there, so the 30fps assertion moved with it. The cfr mode and
+# keyframe flags stay on the driver's ffmpeg line.
+expect_grep "phase-4 concat normalizes to 30fps" "$ROOT/android-compose-lib.sh" "fps=30"
 expect_grep "phase-4 concat forces keyframes" "$DEMO" "keyint_min 30"
 expect_grep "TIGHT pacing is configurable" "$DEMO" "TIGHT_OPT"
 # The demo driver sources the library, so these guards are checked where they
@@ -328,6 +403,10 @@ expect_grep "radio guard wired into the shared library" "$LIB" "GUARD_RADIO_TOGG
 expect_grep "type settle wired into the shared library" "$LIB" "TYPE_FOCUS_SETTLE_SECONDS"
 expect_grep "shared library poll_bounds honors knobs" "$LIB" "POLL_MAX_ATTEMPTS"
 expect_grep "demo sources the shared library" "$DEMO" '^source "\${SCRIPT_DIR}/android-ui-lib\.sh"$'
+# Phase 4's filter comes from the compositing library now, so a driver that
+# stopped sourcing it would call an undefined build_concat_filter and pass an
+# empty graph to ffmpeg. Nothing else in the suite would notice.
+expect_grep "demo sources the compositing library" "$DEMO" '^source "\${SCRIPT_DIR}/android-compose-lib\.sh"$'
 expect_grep "spec-test snapshots auto-rotate before steps" "$SPEC" "autorotate_snapshot"
 expect_grep "spec-test restores auto-rotate on exit" "$SPEC" "autorotate_restore; rm -rf"
 
