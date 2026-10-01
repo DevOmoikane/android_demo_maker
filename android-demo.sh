@@ -402,19 +402,26 @@ autorotate_snapshot
 
 # Muted for the recording itself, not dry-run (no sound/video is captured there, and a
 # banner is harmless to a fixed-pause dry run). zen_mode 2 = total silence (blocks even
-# alarms); restored to whatever the device had before, not hardcoded back to 0, so a
-# user who already had their own DND setting doesn't lose it.
-ORIGINAL_ZEN_MODE=""
+# alarms); each device is restored to whatever it had before, not hardcoded back to 0,
+# so a user who already had their own DND setting doesn't lose it. Restores name
+# their device explicitly rather than following the cursor, whose value at
+# cleanup time is whichever step ran last.
+ZEN_AT_START=("" "")
 if [ "$DRY_RUN" -eq 0 ]; then
-  ORIGINAL_ZEN_MODE="$(ADB shell settings get global zen_mode 2>/dev/null | tr -d '\r')"
-  ADB shell cmd notification set_dnd on >/dev/null 2>&1 || true
+  for ((zen_d = 1; zen_d <= DEVICE_COUNT; zen_d++)); do
+    ZEN_AT_START[$((zen_d - 1))]="$(ADB_FOR "$zen_d" shell settings get global zen_mode 2>/dev/null | tr -d '\r' || true)"
+    ADB_FOR "$zen_d" shell cmd notification set_dnd on >/dev/null 2>&1 || true
+  done
 fi
 
 cleanup() {
+  local zen_d zen_v
   command -v autorotate_restore >/dev/null 2>&1 && autorotate_restore
-  if [ -n "$ORIGINAL_ZEN_MODE" ]; then
-    ADB shell settings put global zen_mode "$ORIGINAL_ZEN_MODE" >/dev/null 2>&1 || true
-  fi
+  for ((zen_d = 1; zen_d <= DEVICE_COUNT; zen_d++)); do
+    zen_v="${ZEN_AT_START[$((zen_d - 1))]}"
+    [ -n "$zen_v" ] || continue
+    ADB_FOR "$zen_d" shell settings put global zen_mode "$zen_v" >/dev/null 2>&1 || true
+  done
   if [ "$KEEP_WORKDIR" -eq 1 ]; then
     echo "==> Keeping workdir: $WORKDIR" >&2
   else
@@ -650,7 +657,7 @@ perform_action() {
 # here (they are reported and recorded as success so downstream if/source=
 # last_command branches take the happy path).
 dry_run_steps() {
-  local arr="$1" depth="$2" n i d step action narration indent cond branch
+  local arr="$1" depth="$2" n i d step action narration dev indent cond branch
   n="$(jq 'length' <<<"$arr")"
   indent=""
   for ((d = 0; d < depth; d++)); do indent="${indent}  "; done
@@ -658,7 +665,9 @@ dry_run_steps() {
     step="$(jq -c ".[$i]" <<<"$arr")"
     action="$(jq -r '.action' <<<"$step")"
     narration="$(jq -r '.narration // empty' <<<"$step")"
-    echo "${indent}-- step ${depth}.${i}: ${action}${narration:+  # ${narration}}"
+    dev="$(jq -r '.device // empty' <<<"$step")"
+    step_device "$step" || return 1
+    echo "${indent}-- dry step ${depth}.${i}: ${action}${dev:+  [device ${dev}]}${narration:+  # ${narration}}"
     case "$action" in
       if)
         cond=0
@@ -744,36 +753,73 @@ echo "==> ${TOTAL_LEAVES} timed beats (leaf steps + condition checks, all branch
 echo "==> Recording + driving the demo"
 SEG_INDEX=0
 SEG_ELAPSED="0"
-REC_PID=""
+REC_PID_1=""
+REC_PID_2=""
 
+# Segment files are per (segment, device): seg_0_1.mp4, seg_0_2.mp4. A second
+# recorder's pull must never overwrite the first's.
+segment_path() {  # segment_path <device> [index]
+  printf '%s/video/seg_%s_%s.mp4' "$WORKDIR" "${2:-$SEG_INDEX}" "$1"
+}
+
+# Every recorder is launched before the sleep, and every recorder is signalled
+# before any of them is waited on. Winding device 1 down before device 2 is even
+# signalled would leave device 2 recording extra seconds at every cut, so its
+# pane would drift further behind on every segment.
 start_segment() {
-  ADB shell screenrecord --bit-rate 8000000 "/sdcard/_android_demo_seg_${SEG_INDEX}.mp4" &
-  REC_PID=$!
+  local d
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    ADB_FOR "$d" shell screenrecord --bit-rate 8000000 \
+      "/sdcard/_android_demo_seg_${SEG_INDEX}_${d}.mp4" &
+    case "$d" in
+      1) REC_PID_1=$! ;;
+      2) REC_PID_2=$! ;;
+    esac
+  done
   sleep 1
 }
 
 stop_segment() {
-  [ -n "$REC_PID" ] || return 0
-  # kill -INT on the LOCAL "adb shell screenrecord &" pid does not reliably
-  # propagate to the REMOTE screenrecord process; adb doesn't forward
-  # signals through a plain (non-PTY) shell session, so the local wrapper can
-  # sit blocked on the device's output stream forever. Signal the on-device
-  # process directly over a fresh adb call instead; that's what actually
-  # makes it finalize the mp4 and close the stream the local wrapper is
-  # waiting on. Bound the subsequent wait and fall back to a hard kill so a
-  # genuinely wedged wrapper can never hang the whole run.
-  ADB shell pkill -INT screenrecord >/dev/null 2>&1 || true
-  local waited=0
-  while kill -0 "$REC_PID" 2>/dev/null && [ "$waited" -lt 8 ]; do
-    sleep 1
-    waited=$((waited + 1))
+  # pid initialized because the loop body reads it under set -u, and a DEVICE_COUNT
+  # the case below does not cover would otherwise abort the run with no message.
+  local d pid="" waited=0
+
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    ADB_FOR "$d" shell pkill -INT screenrecord >/dev/null 2>&1 || true
   done
-  kill -9 "$REC_PID" 2>/dev/null || true
-  wait "$REC_PID" 2>/dev/null || true
+
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    case "$d" in
+      1) pid="$REC_PID_1" ;;
+      2) pid="$REC_PID_2" ;;
+    esac
+    [ -n "$pid" ] || continue
+    # kill -INT on the LOCAL "adb shell screenrecord &" pid does not reliably
+    # propagate to the REMOTE screenrecord process; adb doesn't forward signals
+    # through a plain (non-PTY) shell session, so the local wrapper can sit
+    # blocked on the device's output stream forever. Signal the on-device
+    # process directly over a fresh adb call instead; that's what actually makes
+    # it finalize the mp4 and close the stream the local wrapper is waiting on.
+    # Bound the subsequent wait and fall back to a hard kill so a genuinely
+    # wedged wrapper can never hang the whole run.
+    waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 8 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
   sleep 1
-  ADB pull "/sdcard/_android_demo_seg_${SEG_INDEX}.mp4" "$WORKDIR/video/seg_${SEG_INDEX}.mp4" >/dev/null 2>&1
-  ADB shell rm -f "/sdcard/_android_demo_seg_${SEG_INDEX}.mp4" >/dev/null 2>&1 || true
-  REC_PID=""
+
+  for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    ADB_FOR "$d" pull "/sdcard/_android_demo_seg_${SEG_INDEX}_${d}.mp4" \
+      "$(segment_path "$d")" >/dev/null 2>&1
+    ADB_FOR "$d" shell rm -f "/sdcard/_android_demo_seg_${SEG_INDEX}_${d}.mp4" >/dev/null 2>&1 || true
+  done
+
+  REC_PID_1=""
+  REC_PID_2=""
 }
 
 # ---- Drive engine ----------------------------------------------------------
@@ -868,6 +914,7 @@ run_leaf_step() {
   local step="$1" id="$2"
   local action narration settle_ms settle_s
   local action_start action_end act
+  step_device "$step" || return 1
   action="$(jq -r '.action' <<<"$step")"
   narration="$(jq -r '.narration // empty' <<<"$step")"
   settle_ms="$(jq -r '.settle_ms // 600' <<<"$step")"
@@ -899,6 +946,7 @@ run_steps() {
         settle_ms="$(jq -r '.settle_ms // 600' <<<"$step")"
         settle_s="$(awk -v ms="$settle_ms" 'BEGIN{printf "%.3f", ms/1000}')"
         echo "-- step ${id}: if${narration:+  # ${narration}}"
+        step_device "$step" || return 1
         begin_beat
         action_start="$(date +%s.%N)"
         cond=0
@@ -1003,7 +1051,7 @@ echo "==> Normalizing ${SEG_COUNT} recording segment$([ "$SEG_COUNT" -gt 1 ] && 
 args=()
 filter=""
 for s in $(seq 0 $((SEG_COUNT - 1))); do
-  args+=(-i "$WORKDIR/video/seg_${s}.mp4")
+  args+=(-i "$(segment_path 1 "$s")")
   filter="${filter}[${s}:v]"
 done
 filter="${filter}concat=n=${SEG_COUNT}:v=1:a=0[outv]"

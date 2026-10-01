@@ -51,15 +51,24 @@ use_device() {
 
 # Points the device cursor at the step's own device. Absent means device 1 and
 # never inherits from an earlier step, so a step reads the same wherever it
-# sits in the file. Call it once per step, before dispatching that step's
-# action.
+# sits in the file. Every step entry point a caller has (leaf, if branch, dry
+# run) must call this, before dispatching that step's action.
 step_device() {
   local d
   d="$(jq -r '.device // 1' <<<"$1")"
   case "$d" in
-    1|2) use_device "$d" ;;
+    1|2) ;;
     *) echo "ERROR: step 'device' must be 1 or 2 (got '$d')" >&2; return 1 ;;
   esac
+  # A device the run never attached has no serial and no app, so the cursor
+  # would point at an empty slot and the step would fail later as a confusing
+  # adb error. Say which step device is missing and how to attach it.
+  if [ "$d" -gt "${DEVICE_COUNT:-1}" ]; then
+    echo "ERROR: step 'device' is $d but this run has $DEVICE_COUNT device(s) attached." >&2
+    echo "       Attach the second device with --serial-2, or drop the step's 'device'." >&2
+    return 1
+  fi
+  use_device "$d"
 }
 
 # ----------------------------------------------------------- auto-rotate hygiene
