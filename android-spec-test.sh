@@ -156,6 +156,9 @@ done
 case "$APP_ID" in
   */*) echo "ERROR: --app-id takes a bare package id (no '/'); pass the component separately with --activity" >&2; exit 1 ;;
 esac
+case "$APP_ID_2" in
+  */*) echo "ERROR: --app-id-2 takes a bare package id (no '/'); pass the component separately with --activity-2" >&2; exit 1 ;;
+esac
 
 # Auto-load a .env next to the scenario file or directory (then one next to
 # this script) for {{ENV:...}} substitution, without clobbering anything
@@ -214,7 +217,7 @@ else
     SERIALS[1]="$(printf '%s\n' "$OTHERS" | head -n 1)"
     DEVICE_COUNT=2
   elif [ "$other_count" -gt 1 ]; then
-    echo "==> $other_count other devices are attached but --serial-2 was not given; recording device 1 only" >&2
+    echo "==> $other_count other devices are attached but --serial-2 was not given; running device 1 only" >&2
     adb devices | tail -n +2 >&2
   fi
 fi
@@ -270,10 +273,10 @@ ACTIVITY_BY_DEV=("$ACTIVITY" "")
 if [ "$DEVICE_COUNT" -eq 2 ]; then
   APP_BY_DEV[1]="$APP_ID_2"
   ACTIVITY_BY_DEV[1]="$(resolve_activity_for "${SERIALS[1]}" "$APP_ID_2" "$ACTIVITY_OVERRIDE_2")"
-  read -r w2 h2 < <(adb -s "${SERIALS[1]}" shell wm size 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
+  read -r w2 h2 < <(ADB_FOR 2 shell wm size 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
   SCREEN_W_BY_DEV[1]="${w2:-1080}"
   SCREEN_H_BY_DEV[1]="${h2:-2400}"
-  echo "==> recording 2 devices: ${SERIALS[0]} and ${SERIALS[1]}" >&2
+  echo "==> running 2 devices: ${SERIALS[0]} and ${SERIALS[1]}" >&2
 fi
 # Points the cursor at device 1 and exports the DEMO_* context exec steps read.
 use_device 1

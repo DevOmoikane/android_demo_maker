@@ -73,7 +73,8 @@ printf '0\n' > "$ROT_A"
 printf '1\n' > "$ROT_B"
 cleanup_test_tmp() {
   rm -rf "${STUB_DIR:-/nonexistent}" "${CALLS:-/nonexistent}" \
-         "${EMPTY_STEPS:-/nonexistent}" "${EMPTY_SCENARIOS:-/nonexistent}" 2>/dev/null
+         "${EMPTY_STEPS:-/nonexistent}" "${EMPTY_SCENARIOS:-/nonexistent}" \
+         "${LAUNCH_SCENARIOS:-/nonexistent}" 2>/dev/null
   rm -f "$ROT_A" "$ROT_B"
 }
 trap cleanup_test_tmp EXIT
@@ -303,17 +304,15 @@ rc=0
 "$SPEC" --serial-2 SER2 --app-id-2 com.other.app --help >/dev/null 2>&1 || rc=$?
 expect "spec second-device flags parse" "$rc" "0"
 
-expect_grep "demo seeds SERIALS" "$DEMO" 'SERIALS=("$SERIAL" "")'
-expect_grep "spec seeds SERIALS" "$SPEC" 'SERIALS=("$SERIAL" "")'
-expect_grep "demo rejects a duplicate second serial" "$DEMO" "--serial-2 is the same device"
-
 # ------------------------------------------------------- second-device resolution
 # Serials, activities and screen sizes are resolved by shelling out to adb, so
 # the only honest way to test that wiring is to hand a driver a fake adb and read
 # back what it asked for. ADB_CALLS logs every call, FAKE_DEVICES is what
 # `adb devices` answers with, and SER1 reports a 1080x2400 screen while any other
 # serial reports 720x1600, so a size read aimed at the wrong device shows up as a
-# wrong number instead of a plausible one.
+# wrong number instead of a plausible one. FAKE_RESOLVE replaces the
+# package manager's whole answer, to reach the resolver's fallbacks;
+# FAKE_SIZELESS serial reports a wm size with nothing parseable in it.
 STUB_DIR="$(mktemp -d)"
 cat > "$STUB_DIR/adb" <<'STUB'
 #!/usr/bin/env bash
@@ -327,12 +326,17 @@ serial=""
 case "$*" in
   *"wm size"*)
     case "$serial" in
-      SER1) echo "Physical size: 1080x2400" ;;
-      *)    echo "Physical size: 720x1600" ;;
+      SER1)     echo "Physical size: 1080x2400" ;;
+      SIZELESS*) echo "Override size: N/A" ;;
+      *)        echo "Physical size: 720x1600" ;;
     esac ;;
   *resolve-activity*)
-    for last; do :; done
-    printf 'priority=0 preferredOrder=0 match=0x108000\n%s/.MainActivity\n' "$last" ;;
+    if [ -n "${FAKE_RESOLVE:-}" ]; then
+      printf '%s\n' "$FAKE_RESOLVE"
+    else
+      for last; do :; done
+      printf 'priority=0 preferredOrder=0 match=0x108000\n%s/.MainActivity\n' "$last"
+    fi ;;
   *accelerometer_rotation*) echo "1" ;;
 esac
 exit 0
@@ -341,8 +345,12 @@ chmod +x "$STUB_DIR/adb"
 CALLS="$(mktemp)"
 EMPTY_STEPS="$(mktemp)"
 EMPTY_SCENARIOS="$(mktemp)"
+LAUNCH_SCENARIOS="$(mktemp)"
 printf '[]\n' > "$EMPTY_STEPS"
 printf '[]\n' > "$EMPTY_SCENARIOS"
+# One scenario that launches, so the resolved activity is visible as the
+# component the driver actually asks the device to start.
+printf '[{"name":"launches","steps":[{"action":"launch"}]}]\n' > "$LAUNCH_SCENARIOS"
 
 drive() { # drive <fake-devices> <driver> <driver args...>
   local runner
@@ -352,7 +360,8 @@ drive() { # drive <fake-devices> <driver> <driver args...>
   DRIVE_RC=0
   # TRACED=1 traces the driver so the per-device arrays it builds can be read
   # back; nothing else exposes them until step dispatch can target device 2.
-  DRIVE_OUT="$(ADB_CALLS="$CALLS" FAKE_DEVICES="$FAKE_DEVICES" PATH="$STUB_DIR:$PATH" \
+  DRIVE_OUT="$(ADB_CALLS="$CALLS" FAKE_DEVICES="$FAKE_DEVICES" \
+               FAKE_RESOLVE="${FAKE_RESOLVE:-}" PATH="$STUB_DIR:$PATH" \
                bash ${TRACED:+-x} "$runner" --app-id com.example.app "$@" 2>&1)" || DRIVE_RC=$?
   DRIVE_CALLS="$(cat "$CALLS")"
 }
@@ -426,6 +435,31 @@ expect "--serial-2 equal to --serial is refused" "$DRIVE_RC" "1"
 expect_contains "the refusal names the clash" \
   "$DRIVE_OUT" "--serial-2 is the same device as --serial (SER1)"
 
+# --app-id-2 gets the same bare-package-id check --app-id has, so a malformed
+# value says so instead of resolving to a doubled component path.
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --app-id-2 com.other.app/.MainActivity \
+  --dry-run --steps "$EMPTY_STEPS"
+expect "a component in --app-id-2 is refused" "$DRIVE_RC" "1"
+expect_contains "and names the flag and its own fix" "$DRIVE_OUT" \
+  "--app-id-2 takes a bare package id"
+expect "and nothing was asked of any device" "$DRIVE_CALLS" ""
+
+# A device whose `wm size` answers with nothing parseable must not take the run
+# down: read returns non-zero on EOF, which under the demo driver's set -e would
+# abort silently and leave the assumed-size fallback below it unreachable.
+SIZELESS_PAIR='SIZELESS  device usb:1-1
+SIZELESS2  device usb:1-2'
+TRACED=1
+drive "$SIZELESS_PAIR" "$DEMO" --serial SIZELESS --serial-2 SIZELESS2 \
+  --dry-run --steps "$EMPTY_STEPS"
+unset TRACED
+expect "devices with no readable screen size still run" "$DRIVE_RC" "0"
+expect_match "device 1 falls back to the assumed width" "$DRIVE_OUT" '^\+* SCREEN_W=1080$'
+expect_match "device 1 to the assumed height" "$DRIVE_OUT" '^\+* SCREEN_H=2400$'
+expect_match "device 2 falls back to the assumed width" \
+  "$DRIVE_OUT" '^\+* SCREEN_W_BY_DEV\[1\]=1080$'
+expect_match "device 2 to the assumed height" "$DRIVE_OUT" '^\+* SCREEN_H_BY_DEV\[1\]=2400$'
+
 # --app-id-2 reaches device 2's resolution without disturbing device 1's.
 drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --app-id-2 com.other.app \
   --dry-run --steps "$EMPTY_STEPS"
@@ -453,20 +487,108 @@ expect_match "device 2's activity override lands in slot 2" \
 expect_no_contains "an --activity-2 override skips the query entirely" \
   "$DRIVE_CALLS" "-s emulator-5554 shell cmd package resolve-activity"
 
-# The spec driver runs the same resolution, so it gets the same treatment.
-drive "$PHONE_AND_EMULATOR" "$SPEC" --serial SER1 --scenarios "$EMPTY_SCENARIOS"
+# An override that already names a component is used as it stands, not
+# re-prefixed with the package.
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --activity com.other.app/.Deep \
+  --dry-run --steps "$EMPTY_STEPS"
+expect_contains "an absolute --activity is launched unchanged" "$DRIVE_CALLS" \
+  "shell am start -n com.other.app/.Deep"
+expect_no_contains "and skips the resolve query" "$DRIVE_CALLS" "resolve-activity"
+
+# The demo driver's own copy of resolve_activity_for, on both of its fallbacks:
+# the dry run launches the resolved component, so the call log shows what it
+# settled on.
+FAKE_RESOLVE="No activity found"
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
+expect "an empty resolve answer still runs the demo driver" "$DRIVE_RC" "0"
+expect_contains "and falls back to the conventional .MainActivity" "$DRIVE_CALLS" \
+  "shell am start -n com.example.app/.MainActivity"
+
+FAKE_RESOLVE="com.other.vendor/.DeepLink"
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
+expect "a non-matching resolve answer still runs the demo driver" "$DRIVE_RC" "0"
+expect_contains "and takes the one component that came back" "$DRIVE_CALLS" \
+  "shell am start -n com.other.vendor/.DeepLink"
+unset FAKE_RESOLVE
+
+# ------------------------------------------------------------- spec driver paths
+# The demo driver above always passes --serial, so the spec driver's own copy of
+# the primary auto-detect, its duplicate refusal and its two-others warning are
+# only reachable here.
+drive "$PHONE_AND_EMULATOR" "$SPEC" --scenarios "$EMPTY_SCENARIOS"
 expect "the spec driver runs two devices" "$DRIVE_RC" "0"
 expect_contains "the spec driver adopts the lone emulator" \
-  "$DRIVE_OUT" "==> recording 2 devices: SER1 and emulator-5554"
+  "$DRIVE_OUT" "==> running 2 devices: SER1 and emulator-5554"
 expect "the spec driver reads device 2's screen size" \
   "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell wm size')" "1"
-expect_contains "and resolves device 2's activity on device 2" "$DRIVE_CALLS" \
-  "-s emulator-5554 shell cmd package resolve-activity"
+expect_contains "and resolves device 2's activity on device 2, on the same app by default" \
+  "$DRIVE_CALLS" "-s emulator-5554 shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app"
+expect_contains "the spec driver's own auto-detect picks the phone" \
+  "$DRIVE_OUT" "entries, device SER1 (com.example.app)"
+
+drive '' "$SPEC" --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver with nothing attached is fatal" "$DRIVE_RC" "1"
+expect_contains "and says nothing is connected" "$DRIVE_OUT" "no device connected over USB"
+
+drive "$TWO_PHONES_AND_EMULATOR" "$SPEC" --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver with several phones and no --serial is fatal" "$DRIVE_RC" "1"
+expect_contains "and names the flag that disambiguates" \
+  "$DRIVE_OUT" "2 devices connected; pass one with --serial"
+
+drive 'SER1  device usb:1-1' "$SPEC" --serial SER1 --serial-2 SER1 \
+  --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver refuses a duplicate --serial-2" "$DRIVE_RC" "1"
+expect_contains "and names the clash" \
+  "$DRIVE_OUT" "--serial-2 is the same device as --serial (SER1)"
+
+drive "$TWO_PHONES_AND_EMULATOR" "$SPEC" --serial SER1 --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver with two others runs single-device" "$DRIVE_RC" "0"
+expect_contains "and reports them without guessing" "$DRIVE_OUT" \
+  "2 other devices are attached but --serial-2 was not given; running device 1 only"
+expect_contains "listing them to pick from" "$DRIVE_OUT" "SER2  device usb:1-2"
+expect_no_contains "no two-device banner without --serial-2" "$DRIVE_OUT" "running 2 devices"
+expect_no_contains "and neither unchosen device is contacted" "$DRIVE_CALLS" "SER2 "
+expect_no_contains "the emulator is not contacted either" "$DRIVE_CALLS" "emulator-5554"
+
+drive 'SER1  device usb:1-1' "$SPEC" --serial SER1 --app-id-2 com.other.app/.MainActivity \
+  --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver refuses a component in --app-id-2" "$DRIVE_RC" "1"
+expect_contains "and names the flag and its own fix" "$DRIVE_OUT" \
+  "--app-id-2 takes a bare package id"
+
+# Its own device-2 slots, with an absolute --activity-2 that must survive
+# composition unchanged.
+TRACED=1
 drive "$PHONE_AND_EMULATOR" "$SPEC" --serial SER1 --serial-2 SER2 \
-  --app-id-2 com.other.app --activity-2 .Custom --scenarios "$EMPTY_SCENARIOS"
-expect "an explicit --serial-2 needs no auto-detect" "$DRIVE_RC" "0"
+  --app-id-2 com.other.app --activity-2 com.other.app/.Custom \
+  --scenarios "$EMPTY_SCENARIOS"
+unset TRACED
+expect "an absolute --activity-2 runs the spec driver" "$DRIVE_RC" "0"
 expect_contains "the spec driver adopts the serial it was given" \
-  "$DRIVE_OUT" "==> recording 2 devices: SER1 and SER2"
+  "$DRIVE_OUT" "==> running 2 devices: SER1 and SER2"
+expect_match "its screen width lands in slot 2" "$DRIVE_OUT" '^\+* SCREEN_W_BY_DEV\[1\]=720$'
+expect_match "its screen height lands in slot 2" "$DRIVE_OUT" '^\+* SCREEN_H_BY_DEV\[1\]=1600$'
+expect_match "its app lands in slot 2" "$DRIVE_OUT" '^\+* APP_BY_DEV\[1\]=com\.other\.app$'
+expect_match "its absolute activity lands in slot 2 un-re-prefixed" \
+  "$DRIVE_OUT" '^\+* ACTIVITY_BY_DEV\[1\]=com\.other\.app/\.Custom$'
+expect_no_contains "and no query was needed" \
+  "$DRIVE_CALLS" "-s SER2 shell cmd package resolve-activity"
+
+# resolve_activity_for's two fallbacks, reached by making the package manager
+# answer with no matching component. The launch step is what shows the component
+# the driver settled on.
+FAKE_RESOLVE="No activity found"
+drive 'SER1  device usb:1-1' "$SPEC" --serial SER1 --scenarios "$LAUNCH_SCENARIOS"
+expect "an empty resolve answer still runs" "$DRIVE_RC" "0"
+expect_contains "and falls back to the conventional .MainActivity" "$DRIVE_CALLS" \
+  "shell am start -n com.example.app/.MainActivity"
+
+FAKE_RESOLVE="com.other.vendor/.DeepLink"
+drive 'SER1  device usb:1-1' "$SPEC" --serial SER1 --scenarios "$LAUNCH_SCENARIOS"
+expect "a non-matching resolve answer still runs" "$DRIVE_RC" "0"
+expect_contains "and takes the one component that came back" "$DRIVE_CALLS" \
+  "shell am start -n com.other.vendor/.DeepLink"
+unset FAKE_RESOLVE
 
 # ---------------------------------------------------------------- summary
 echo

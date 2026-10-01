@@ -254,6 +254,9 @@ esac
 case "$APP_ID" in
   */*) echo "ERROR: --app-id takes a bare package id (no '/'); pass the component separately with --activity" >&2; exit 1 ;;
 esac
+case "$APP_ID_2" in
+  */*) echo "ERROR: --app-id-2 takes a bare package id (no '/'); pass the component separately with --activity-2" >&2; exit 1 ;;
+esac
 
 [ -n "$STEPS_FILE" ] || STEPS_FILE="${SCRIPT_DIR}/android-demo-steps.json"
 [ -f "$STEPS_FILE" ] || { echo "ERROR: step file not found: $STEPS_FILE" >&2; exit 1; }
@@ -421,7 +424,11 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$WORKDIR/audio" "$WORKDIR/video"
 
-read -r SCREEN_W SCREEN_H < <(ADB shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
+# || true on both reads: read returns non-zero when the pipeline prints nothing,
+# which under set -e would abort the run with no message at all, leaving the
+# fallbacks below unreachable and a device that merely failed to answer wm size
+# looking like a fatal error.
+read -r SCREEN_W SCREEN_H < <(ADB shell wm size | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ') || true
 SCREEN_W="${SCREEN_W:-1080}"
 SCREEN_H="${SCREEN_H:-2400}"
 SCREEN_W_BY_DEV=("$SCREEN_W" "")
@@ -432,7 +439,7 @@ ACTIVITY_BY_DEV=("$ACTIVITY" "")
 if [ "$DEVICE_COUNT" -eq 2 ]; then
   APP_BY_DEV[1]="$APP_ID_2"
   ACTIVITY_BY_DEV[1]="$(resolve_activity_for "${SERIALS[1]}" "$APP_ID_2" "$ACTIVITY_OVERRIDE_2")"
-  read -r w2 h2 < <(adb -s "${SERIALS[1]}" shell wm size 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
+  read -r w2 h2 < <(ADB_FOR 2 shell wm size 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ') || true
   SCREEN_W_BY_DEV[1]="${w2:-1080}"
   SCREEN_H_BY_DEV[1]="${h2:-2400}"
   echo "==> recording 2 devices: ${SERIALS[0]} and ${SERIALS[1]}" >&2
