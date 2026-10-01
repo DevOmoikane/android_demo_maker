@@ -399,7 +399,6 @@ DEVICE_COUNT=2
 SCREEN_W_BY_DEV=(1080 1080)
 SCREEN_H_BY_DEV=(2400 2400)
 f3="$(build_concat_filter 3)"
-order_pairs() { printf '%s' "$(compose_input_order 3)" | tr '\n' ';' ; }
 expect "the input list is segment-major" \
   "$(compose_input_order 3 | tr '\n' ';' | sed 's/;$//')" \
   "0 1;0 2;1 1;1 2;2 1;2 2"
@@ -413,15 +412,22 @@ graph_pairs() {
 expect "each input index pairs with the pane the graph names at it" \
   "$(graph_pairs | tr '\n' ';' | sed 's/;$//')" \
   "0 0 1;1 0 2;2 1 1;3 1 2;4 2 1;5 2 2"
-# And the index the graph reads is the slot the list fills, checked both ways
-# through the shared arithmetic rather than by re-deriving it here.
+# The pane the graph builds for a pair must read the input that the list files
+# under that pair's *position*, and not merely the index compose_input_index
+# computes for it: those two are the same value only while the list is in the
+# order the index assumes, so comparing against the position is what makes a
+# reordered list visible. Three segments and two devices is the smallest case
+# where the two orders differ at all; on a single segment they coincide, which
+# is why this cannot be checked on the one-segment recorded run further down.
 mismatch=0
+nth=0
 while read -r s d; do
   graph_idx="$(printf '%s' "$f3" | tr ';' '\n' \
     | sed -n "s/^\[\([0-9]*\):v\].*\[s${s}d${d}\]\$/\1/p")"
-  [ "$graph_idx" = "$(compose_input_index "$s" "$d")" ] || mismatch=$((mismatch + 1))
+  [ "$graph_idx" = "$nth" ] || mismatch=$((mismatch + 1))
+  nth=$((nth + 1))
 done < <(compose_input_order 3)
-expect "every listed input sits at the index its pane reads" "$mismatch" "0"
+expect "every pane reads the input its own list position files" "$mismatch" "0"
 # A one-device run still enumerates one input per segment, so phase 4's loop
 # shape is the same for both, and DEVICE_COUNT unset means one device.
 DEVICE_COUNT=1
@@ -436,7 +442,7 @@ expect "and the geometry defaults instead of erroring" \
 # The library's functions stay defined, but the state this section set is not
 # left behind: DEVICE_COUNT=2 and the geometry arrays would silently apply to
 # every section that follows, which is a trap for whoever adds the next one.
-unset COMPOSE_HEIGHT f2 f3 geom graph_pairs order_pairs DEVICE_COUNT
+unset COMPOSE_HEIGHT f2 f3 geom graph_pairs DEVICE_COUNT
 unset SCREEN_W_BY_DEV SCREEN_H_BY_DEV
 expect "the compositing section leaves no device count behind" "${DEVICE_COUNT:-<unset>}" "<unset>"
 expect "and no geometry arrays" \
