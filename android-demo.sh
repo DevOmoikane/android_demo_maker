@@ -1081,14 +1081,16 @@ fi
 # gives Phase 5 a video with real duration metadata to work with, since the
 # multi-segment path already needed this pass anyway.
 SEG_COUNT=$((SEG_INDEX + 1))
-echo "==> Normalizing ${SEG_COUNT} recording segment$([ "$SEG_COUNT" -gt 1 ] && echo s)"
 args=()
-for s in $(seq 0 $((SEG_COUNT - 1))); do
-  for d in $(seq 1 "$DEVICE_COUNT"); do
-    args+=(-i "$(segment_path "$d" "$s")")
-  done
-done
+# The input order is the library's, not a loop of our own: it is the same
+# arithmetic build_concat_filter uses to number its panes, so the recording at
+# each -i slot is the one that pane shows. See compose_input_order.
+while read -r s d; do
+  args+=(-i "$(segment_path "$d" "$s")")
+done < <(compose_input_order "$SEG_COUNT")
 filter="$(build_concat_filter "$SEG_COUNT")"
+build_compose_geometry "${COMPOSE_HEIGHT:-1080}"
+echo "==> Normalizing ${SEG_COUNT} recording segment$([ "$SEG_COUNT" -gt 1 ] && echo s) to ${COMPOSE_W}x${COMPOSE_H}"
 # Normalise the frame rate on the way out of the concat. screenrecord emits
 # variable-rate frames with duplicate DTS, and h264 written straight from them
 # lands its first keyframe tens of seconds in. Players then show the opening as

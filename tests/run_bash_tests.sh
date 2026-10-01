@@ -318,12 +318,18 @@ COMPOSE_HEIGHT=1080
 . "$ROOT/android-compose-lib.sh"
 
 DEVICE_COUNT=1
+SCREEN_W_BY_DEV=(1080)
+SCREEN_H_BY_DEV=(2400)
 expect "single device filter is unchanged" \
   "$(build_concat_filter 3)" \
   "[0:v][1:v][2:v]concat=n=3:v=1:a=0[outvraw];[outvraw]fps=30,format=yuv420p[outv]"
 expect "single device, single segment" \
   "$(build_concat_filter 1)" \
   "[0:v]concat=n=1:v=1:a=0[outvraw];[outvraw]fps=30,format=yuv420p[outv]"
+# One device passes through unscaled, so the composite is the device's own screen
+# and not a pane of it. The driver reports this size, so it has to be set here.
+build_compose_geometry 1080
+expect "one device's output is its own screen size" "$COMPOSE_W x $COMPOSE_H" "1080 x 2400"
 
 DEVICE_COUNT=2
 SCREEN_W_BY_DEV=(1080 1080)
@@ -381,6 +387,60 @@ SCREEN_H_BY_DEV=(2400 1080)
 expect "a landscape second device gets its own pane width" \
   "$(printf '%s' "$(build_concat_filter 1)" | grep -o 'scale=[0-9]*:1080' | tr '\n' ' ')" \
   "scale=486:1080 scale=1920:1080 "
+
+# ------------------------------------------------------------- input order
+# The input list and the filter graph have to agree on which recording is which
+# pane, and neither can see the other: the driver fills its -i slots from
+# compose_input_order, the graph numbers its inputs with compose_input_index. A
+# disagreement is invisible, since ffmpeg renders whatever pairing it is given,
+# so the two are pinned against each other here rather than one being asserted
+# and the other assumed.
+DEVICE_COUNT=2
+SCREEN_W_BY_DEV=(1080 1080)
+SCREEN_H_BY_DEV=(2400 2400)
+f3="$(build_concat_filter 3)"
+order_pairs() { printf '%s' "$(compose_input_order 3)" | tr '\n' ';' ; }
+expect "the input list is segment-major" \
+  "$(compose_input_order 3 | tr '\n' ';' | sed 's/;$//')" \
+  "0 1;0 2;1 1;1 2;2 1;2 2"
+# Every (segment, device) the input list yields must be the pair the graph names
+# at that input's index. Reading the graph's own labels back gives the pairing it
+# will actually use, so this fails if either half moves.
+graph_pairs() {
+  printf '%s' "$f3" | tr ';' '\n' \
+    | sed -n 's/^\[\([0-9]*\):v\].*\[s\([0-9]*\)d\([0-9]*\)\]$/\1 \2 \3/p'
+}
+expect "each input index pairs with the pane the graph names at it" \
+  "$(graph_pairs | tr '\n' ';' | sed 's/;$//')" \
+  "0 0 1;1 0 2;2 1 1;3 1 2;4 2 1;5 2 2"
+# And the index the graph reads is the slot the list fills, checked both ways
+# through the shared arithmetic rather than by re-deriving it here.
+mismatch=0
+while read -r s d; do
+  graph_idx="$(printf '%s' "$f3" | tr ';' '\n' \
+    | sed -n "s/^\[\([0-9]*\):v\].*\[s${s}d${d}\]\$/\1/p")"
+  [ "$graph_idx" = "$(compose_input_index "$s" "$d")" ] || mismatch=$((mismatch + 1))
+done < <(compose_input_order 3)
+expect "every listed input sits at the index its pane reads" "$mismatch" "0"
+# A one-device run still enumerates one input per segment, so phase 4's loop
+# shape is the same for both, and DEVICE_COUNT unset means one device.
+DEVICE_COUNT=1
+expect "one device lists one input per segment" \
+  "$(compose_input_order 3 | tr '\n' ';' | sed 's/;$//')" "0 1;1 1;2 1"
+unset DEVICE_COUNT
+expect "an unset device count means one device" \
+  "$(compose_input_order 2 | tr '\n' ';' | sed 's/;$//')" "0 1;1 1"
+expect "and the geometry defaults instead of erroring" \
+  "$(build_compose_geometry 1080; printf '%s x %s' "$COMPOSE_W" "$COMPOSE_H")" "1080 x 2400"
+
+# The library's functions stay defined, but the state this section set is not
+# left behind: DEVICE_COUNT=2 and the geometry arrays would silently apply to
+# every section that follows, which is a trap for whoever adds the next one.
+unset COMPOSE_HEIGHT f2 f3 geom graph_pairs order_pairs DEVICE_COUNT
+unset SCREEN_W_BY_DEV SCREEN_H_BY_DEV
+expect "the compositing section leaves no device count behind" "${DEVICE_COUNT:-<unset>}" "<unset>"
+expect "and no geometry arrays" \
+  "$(declare -p SCREEN_W_BY_DEV 2>&1 | grep -c 'not found' || true)" "1"
 
 # ---------------------------------------------------------------- demo driver smoke
 help_out="$("$DEMO" --help 2>&1)"
@@ -484,7 +544,21 @@ case "$*" in
 esac
 exit 0
 STUB
-chmod +x "$STUB_DIR/adb"
+# A fake ffmpeg in the same stub dir, for the one thing the adb log cannot see:
+# the argument list phase 4 actually hands ffmpeg. The input order is the point,
+# since a mispaired -i still renders a plausible video, so it has to be read off
+# the invocation rather than inferred from the graph. Every argument is logged on
+# its own line, which is what makes "-i b.mp4 -i a.mp4" distinguishable from
+# "-i ba.mp4". The stub creates the output file so the run carries on to phase 5.
+cat > "$STUB_DIR/ffmpeg" <<'STUB'
+#!/usr/bin/env bash
+for arg; do printf '%s\n' "$arg" >> "$FFMPEG_ARGS"; done
+printf -- '---\n' >> "$FFMPEG_ARGS"
+for last; do :; done
+: > "$last"
+exit 0
+STUB
+chmod +x "$STUB_DIR/adb" "$STUB_DIR/ffmpeg"
 CALLS="$(mktemp)"
 EMPTY_STEPS="$(mktemp)"
 EMPTY_SCENARIOS="$(mktemp)"
@@ -525,13 +599,36 @@ drive() { # drive <fake-devices> <driver> <driver args...>
   FAKE_DEVICES="$1"; shift
   runner="$1"; shift
   : > "$CALLS"
+  FFMPEG_ARGS=""
   DRIVE_RC=0
   # TRACED=1 traces the driver so the per-device arrays it builds can be read
   # back; nothing else exposes them until step dispatch can target device 2.
+  # The stub ffmpeg logs to a file rather than a variable, since it is a separate
+  # process; a fresh one per run keeps each run's argument list to itself.
+  FFMPEG_LOG="$(mktemp)"
   DRIVE_OUT="$(ADB_CALLS="$CALLS" FAKE_DEVICES="$FAKE_DEVICES" \
-               FAKE_RESOLVE="${FAKE_RESOLVE:-}" PATH="$STUB_DIR:$PATH" \
+               FAKE_RESOLVE="${FAKE_RESOLVE:-}" FFMPEG_ARGS="$FFMPEG_LOG" \
+               PATH="$STUB_DIR:$PATH" \
                bash ${TRACED:+-x} "$runner" --app-id com.example.app "$@" 2>&1)" || DRIVE_RC=$?
   DRIVE_CALLS="$(cat "$CALLS")"
+  DRIVE_FFMPEG="$(cat "$FFMPEG_LOG")"
+  rm -f "$FFMPEG_LOG"
+}
+# The concat invocation's -i arguments in the order they were passed, one per
+# line, reduced to the bare segment file names so a work directory in the path
+# does not have to be stripped and the expectation can name seg_0_1.mp4.
+# The value that followed a given -i in the logged argument list, one per line
+# with the bare segment file name, so the expectation can say seg_0_1.mp4 and
+# the work directory in the path does not have to be stripped. Reading the
+# value from the line after -i is what distinguishes "-i b.mp4 -i a.mp4" from a
+# single "-i ba.mp4", so the order in the log is the order ffmpeg was given.
+concat_inputs() { # concat_inputs <driver-scoped ffmpeg arg log>
+  printf '%s\n' "$1" | awk '/^-i$/{getline; n=split($0, p, "/"); print p[n]}'
+}
+# The filter graph from the logged argument list, i.e. what phase 4 paired with
+# the inputs above rather than what the library would produce now.
+concat_graph() { # concat_graph <driver-scoped ffmpeg arg log>
+  printf '%s\n' "$1" | awk '/^-filter_complex$/{getline; print; exit}'
 }
 count_calls() { printf '%s\n' "$1" | grep -c -- "$2" | tr -d ' '; }
 # The distinct serials a run addressed, in first-seen order. Counting serials
@@ -819,6 +916,56 @@ expect_contains "device 2 is pulled to its own local file" "$DRIVE_CALLS" \
   "video/seg_0_2.mp4"
 expect "each device's on-device file is cleaned up" \
   "$(count_calls "$DRIVE_CALLS" 'shell rm -f /sdcard/_android_demo_seg_0_')" "2"
+
+# What phase 4 hands ffmpeg, read off the invocation above. This is the
+# assertion the negative control showed was missing: mutating the driver's loop to
+# device-major left every other assertion green, because a mispaired input list
+# still renders a plausible 972x1080 video and nothing else in the run can see it.
+# Both facts below come out of one real run: the -i values in the order they were
+# passed, and the graph that was passed with them.
+RECORDED_INPUTS="$(concat_inputs "$DRIVE_FFMPEG")"
+RECORDED_GRAPH="$(concat_graph "$DRIVE_FFMPEG")"
+expect "phase 4 passes the inputs segment-major, device 1 first" \
+  "$(printf '%s' "$RECORDED_INPUTS" | tr '\n' ',')" "seg_0_1.mp4,seg_0_2.mp4"
+# And the two halves against each other on that same run: reading the pane labels
+# back out of the graph and requiring pane N to come from input N. ffmpeg accepts
+# any pairing and renders it, so nothing short of this comparison notices.
+mispair=0
+nth_input=0
+while read -r seg_file; do
+  # The file name is where the driver put that recording, so the pair is read
+  # off the run rather than off the library that produced it.
+  sd="${seg_file#seg_}"; s="${sd%%_*}"
+  case "$sd" in
+    # seg_<s>_<d>.mp4, so what is left after the last _ is the device.
+    *_*) d="${sd##*_}"; d="${d%.mp4}" ;;
+    *) d="" ;;
+  esac
+  pane="$(printf '%s' "$RECORDED_GRAPH" \
+    | tr ';' '\n' | sed -n "s/^\[\([0-9]*\):v\].*\[s${s}d${d}\]\$/\1/p")"
+  [ "$pane" = "$nth_input" ] || mispair=$((mispair + 1))
+  nth_input=$((nth_input + 1))
+done <<< "$RECORDED_INPUTS"
+expect "every pane reads the input at its own position" "$mispair" "0"
+expect "the graph's panes are in input order" \
+  "$(printf '%s' "$RECORDED_GRAPH" \
+     | grep -c '^\[0:v\].*\[s0d1\];\[1:v\].*\[s0d2\]' || true)" "1"
+# The run reports the composite it is about to write, which is what gives
+# COMPOSE_W a production consumer: without the banner, build_compose_geometry's
+# output would be read only by a test.
+expect_contains "and the run names the composite size" "$DRIVE_OUT" \
+  "==> Normalizing 1 recording segment to 972x1080"
+
+# Multi-segment order is pinned where it can be, which is the library. The driver
+# cannot cut a second segment in this suite because LEAVES_LEFT is 0 rather than
+# TOTAL_LEAVES, a defect that predates this task, so a two-segment run is not
+# reachable from here. Instead the driver is required to take its order from
+# compose_input_order and to have no loop of its own, and the multi-segment order
+# is asserted against the library, which is what the driver consumes verbatim.
+expect_grep "phase 4 takes its input order from the library" "$DEMO" \
+  'done < <(compose_input_order "$SEG_COUNT")'
+expect_no_grep "and builds no input loop of its own" "$DEMO" \
+  'for d in $(seq 1 "$DEVICE_COUNT")'
 
 # DND is the other host setting a second device needs, and it is where
 # recording-silence is set up. Each device must be restored to what it had
