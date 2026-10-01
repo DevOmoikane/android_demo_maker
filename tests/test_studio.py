@@ -9,7 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from demo_maker import adb, config, doctor, runner, steps, spec, tts  # noqa: E402
+from demo_maker import (adb, config, doctor, runner, server,  # noqa: E402
+                        steps, spec, tts)
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -141,6 +142,105 @@ class StepsValidationTests(unittest.TestCase):
             [{"name": "s", "steps": [{"action": "tap_text", "text": "x",
                                       "device": 2}]}])
         self.assertEqual([], errors)
+
+
+class DeviceCapacityTests(unittest.TestCase):
+    """A step naming a device the run never attached has no serial and no app
+    behind it. android-ui-lib.sh's step_device refuses it midway through the
+    recording, so the studio says so in the same validation pass instead."""
+
+    DOC = [{"action": "tap_text", "text": "Chats", "device": 2}]
+
+    def test_device_two_rejected_without_a_second_device(self):
+        errors = steps.validate_steps(self.DOC, device_count=1)
+        self.assertEqual(1, len(errors), errors)
+        self.assertEqual("[0]", errors[0]["path"])
+        message = errors[0]["message"]
+        # the message has to say what to do, not just that the value is wrong
+        self.assertIn("'device' is 2", message)
+        self.assertIn("enable the second device", message)
+
+    def test_device_two_accepted_with_a_second_device(self):
+        self.assertEqual([], steps.validate_steps(self.DOC, device_count=2))
+
+    def test_device_one_accepted_at_every_device_count(self):
+        for device_count in (None, 1, 2):
+            for device in (1, "1"):
+                self.assertEqual([], steps.validate_steps(
+                    [{"action": "tap_text", "text": "Chats",
+                      "device": device}], device_count=device_count),
+                    "device=%r at device_count=%r" % (device, device_count))
+
+    def test_unknown_device_count_defers_to_the_shell(self):
+        # save_steps_file and the spec validator both validate without knowing
+        # what a future run will attach, so a device 2 step must stay valid.
+        self.assertEqual([], steps.validate_steps(self.DOC))
+
+    def test_nested_device_two_step_rejected(self):
+        # the limit rides along with the recursion into an if branch, whose
+        # paths carry the branch name.
+        errors = steps.validate_steps(
+            [{"action": "if", "then": [{"action": "back", "device": 2}]}],
+            device_count=1)
+        self.assertEqual("[0].then[0]", errors[0]["path"])
+
+    def test_out_of_range_device_reported_once(self):
+        # the select check already owns anything outside 1 or 2, so the
+        # capacity check must not pile a second message onto the same step
+        errors = steps.validate_steps(
+            [{"action": "tap_text", "text": "x", "device": 3}],
+            device_count=1)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("must be one of", errors[0]["message"])
+
+
+class ServerValidationTests(unittest.TestCase):
+    """The tree editor validates through the API, so the endpoint has to pass
+    the configured device count down or the flag never reaches the editor."""
+
+    DOC = [{"action": "tap_text", "text": "Chats", "device": 2}]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig_file = config.SETTINGS_FILE
+        config.SETTINGS_FILE = Path(self.tmp.name) / "settings.json"
+
+    def tearDown(self):
+        config.SETTINGS_FILE = self.orig_file
+        self.tmp.cleanup()
+
+    def test_device_two_step_flagged_when_second_device_is_off(self):
+        config.update_settings({"second_device": False})
+        errors = server.api_steps_validate(None, {}, {"steps": self.DOC})
+        self.assertTrue(any("enable the second device" in e["message"]
+                            for e in errors["errors"]), errors)
+
+    def test_device_two_step_clean_when_second_device_is_on(self):
+        config.update_settings({"second_device": True, "serial_2": "SER2"})
+        errors = server.api_steps_validate(None, {}, {"steps": self.DOC})
+        self.assertEqual([], errors["errors"])
+
+    def test_spec_documents_get_the_same_limit(self):
+        config.update_settings({"second_device": False})
+        doc = [{"action": "assert_contains", "text": "x", "device": 2}]
+        errors = server.api_spec_validate(None, {}, {"steps": doc})
+        self.assertTrue(any("enable the second device" in e["message"]
+                            for e in errors["errors"]), errors)
+        # and the endpoint the editor actually calls, asking for the spec
+        # registry through its body rather than the second route
+        errors = server.api_steps_validate(
+            None, {}, {"steps": doc, "registry": "spec"})
+        self.assertTrue(any("enable the second device" in e["message"]
+                            for e in errors["errors"]), errors)
+
+    def test_save_still_accepts_a_device_two_step(self):
+        # the editor saves first and validates after, so a file written for a
+        # two-device run must survive a save with the second device switched
+        # off; only the run and the live check object.
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "x.json"
+            self.assertEqual([], steps.save_steps_file(str(target), self.DOC))
+            self.assertEqual(self.DOC, steps.load_steps_file(str(target)))
 
 
 class TtsParsingTests(unittest.TestCase):

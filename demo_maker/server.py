@@ -181,15 +181,28 @@ def api_steps_put(handler, query, body):
     return {"ok": True, "path": path, "errors": []}
 
 
+def _device_count(settings) -> int:
+    """How many device slots the current settings give a run.
+
+    A step naming a slot past this has no serial and no app behind it, so the
+    tree editor has to know the count to flag it before the run rather than
+    leaving it to the shell to trip over mid-recording.
+    """
+    return 2 if settings.get("second_device") else 1
+
+
 def api_steps_validate(handler, query, body):
     registry = spec.SPEC_ACTIONS \
         if str(body.get("registry") or "") == "spec" else None
-    return {"errors": steps.validate_steps(body.get("steps"), registry)}
+    return {"errors": steps.validate_steps(
+        body.get("steps"), registry,
+        device_count=_device_count(config.load_settings()))}
 
 
 def api_spec_validate(handler, query, body):
-    return {"errors": steps.validate_steps(body.get("steps"),
-                                           spec.SPEC_ACTIONS)}
+    return {"errors": steps.validate_steps(
+        body.get("steps"), spec.SPEC_ACTIONS,
+        device_count=_device_count(config.load_settings()))}
 
 
 def api_schema(handler, query, body):

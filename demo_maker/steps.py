@@ -235,30 +235,61 @@ def _validate_drop_target(step, path, errors):
                                   "'to_text', 'to_desc', or 'x'+'y'"})
 
 
+def _validate_device_capacity(step, path, errors, device_count):
+    """Reject a step naming a device slot the run never attached.
+
+    Slot 2 has no serial and no app when only one device is configured, so the
+    step would only fail later as a confusing adb error. Say it here, in the
+    same pass as everything else, and the tree editor can point at the step
+    before the run. device_count is None when the caller cannot say, which is
+    every caller that validates a file rather than a configured run; then the
+    shell's own step_device guard is the one that speaks.
+
+    Only slots the device field offers are judged here. Anything else already
+    has a message from the generic select check, and two complaints about one
+    field read as noise.
+    """
+    if device_count is None:
+        return
+    device = str(step.get("device")).strip()
+    if device not in (_DEVICE_FIELD.get("options") or []):
+        return
+    if int(device) > device_count:
+        errors.append({
+            "path": path,
+            "message": "'device' is %s but this run has %d device(s); "
+                       "enable the second device, or drop the step's "
+                       "'device'" % (device, device_count)})
+
+
 class StepError(Exception):
     pass
 
 
-def validate_steps(steps, registry=None) -> List[dict]:
+def validate_steps(steps, registry=None, device_count=None) -> List[dict]:
     """Return a list of {path, message} issues; empty means valid.
 
     registry defaults to ACTIONS; spec.py passes its own registry for
     scenario files (a different action vocabulary).
+
+    device_count is how many device slots the run has (1 or 2), so a step
+    naming slot 2 can be rejected when only one device is configured. It is
+    None by default, which leaves every existing caller exactly as it was.
     """
     errors: List[dict] = []
     if not isinstance(steps, list):
         return [{"path": "", "message": "steps document must be a JSON array"}]
-    _validate_array(steps, "", errors, registry or ACTIONS)
+    _validate_array(steps, "", errors, registry or ACTIONS, device_count)
     return errors
 
 
-def _validate_array(arr, prefix, errors, registry):
+def _validate_array(arr, prefix, errors, registry, device_count):
     for idx, step in enumerate(arr):
         path = "%s[%d]" % (prefix, idx)
-        _validate_step(step, path, errors, registry)
+        _validate_step(step, path, errors, registry, device_count)
 
 
-def _validate_step(step, path, errors, registry):
+def _validate_step(step, path, errors, registry, device_count):
     def fail(message):
         errors.append({"path": path, "message": message})
 
@@ -306,6 +337,8 @@ def _validate_step(step, path, errors, registry):
         # reports it missing. This check covers the drop-target half.
         _validate_drop_target(step, path, errors)
 
+    _validate_device_capacity(step, path, errors, device_count)
+
     if action == "if":
         source = str(step.get("source") or "last_command")
         if source == "screen" and not str(step.get("text") or "").strip():
@@ -315,7 +348,8 @@ def _validate_step(step, path, errors, registry):
             subtree = step.get(branch)
             if isinstance(subtree, list) and subtree:
                 branches_ok = True
-                _validate_array(subtree, path + "." + branch, errors, registry)
+                _validate_array(subtree, path + "." + branch, errors, registry,
+                                device_count)
             elif subtree not in (None, []) and not isinstance(subtree, list):
                 fail("'%s' must be an array of steps" % branch)
         if not branches_ok:
