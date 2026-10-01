@@ -48,6 +48,14 @@ at_least() { # at_least <desc> <actual> <minimum>
   if [ "$2" -ge "$3" ] 2>/dev/null; then note "$1"; else bail "$1 (got: $2, want: >= $3)"; fi
 }
 
+# Occurrences of a substring inside a single string, for a value that is one
+# comma-joined line rather than a list.
+count_occurrences() { # count_occurrences <desc> <string> <substring> <expected>
+  local n
+  n="$(printf '%s' "$2" | grep -o -- "$3" | wc -l | tr -d ' ')"
+  if [ "$n" = "$4" ]; then note "$1"; else bail "$1 (got: $n occurrences of '$3' in: $2)"; fi
+}
+
 expect_grep() { # expect_grep <desc> <file> <fixed-pattern>
   if grep -q -- "$3" "$2"; then note "$1"; else bail "$1 (no match: $3 in $(basename "$2"))"; fi
 }
@@ -167,13 +175,19 @@ expect_contains "the rejection names the allowed values" "$out" "1 or 2"
 # A device the run never attached is a different failure from a nonsense number:
 # the cursor would point at an empty SERIALS slot and the step would die later as
 # a confusing adb error, so it is refused up front with the fix in the message.
+# The cursor starts on device 1, so an adb call after the refusal is evidence of
+# where it actually is: a step_device that moved before refusing would send that
+# call to device 2's serial instead.
 DEVICE_COUNT=1
 use_device 1
 rc=0
 out="$(step_device '{"action":"tap_text","text":"x","device":2}' 2>&1)" || rc=$?
 expect "a device 2 step is refused in a single-device run" "$rc" "1"
 expect_contains "the refusal names the flag that adds the device" "$out" "--serial-2"
-expect "a refused step leaves the cursor where it was" "$CUR_DEV" "1"
+ADB_LOG=""
+ADB shell echo where-am-i
+expect "a refused step leaves the cursor still on device 1" \
+  "$(printf '%s\n' "$ADB_LOG" | sed -n 's/^\([^|]*\)|.*/\1/p')" "$SERIAL_A"
 rc=0
 step_device '{"action":"tap_text","text":"x","device":1}' || rc=$?
 expect "a device 1 step still works with one device attached" "$rc" "0"
@@ -363,12 +377,22 @@ case "$*" in
   # Per device, so a test can tell a per-device restore from a hardcoded one:
   # device 1 reports 0 (DND off, must end up off) and every other serial
   # reports 2 (total silence, must be handed back as 2, not flattened to 0).
+  # GARBAGE reports something the driver does not recognize, which is a read
+  # result and must never be written back.
   *"get global zen_mode"*)
     case "$serial" in
       SER1) echo "0" ;;
+      GARBAGE) echo "not-a-zen-mode" ;;
       *) echo "2" ;;
     esac ;;
   *accelerometer_rotation*) echo "1" ;;
+  # A serial whose segment pull fails, the way a device that dropped off
+  # mid-segment does. Only the pull fails; everything else on that serial works.
+  *pull*_android_demo_seg*)
+    if [ "$serial" = "NOPULL" ]; then
+      echo "adb: error: failed to stat remote object" >&2
+      exit 1
+    fi ;;
 esac
 exit 0
 STUB
@@ -422,6 +446,12 @@ drive() { # drive <fake-devices> <driver> <driver args...>
   DRIVE_CALLS="$(cat "$CALLS")"
 }
 count_calls() { printf '%s\n' "$1" | grep -c -- "$2" | tr -d ' '; }
+# The distinct serials a run addressed, in first-seen order. Counting serials
+# rather than asserting one is absent is what makes "only the named device was
+# contacted" an assertion that can actually fail.
+serials_touched() {
+  printf '%s\n' "$1" | sed -n 's/^-s \([^ ]*\) .*/\1/p' | awk '!seen[$0]++' | tr '\n' ','
+}
 
 PHONE_AND_EMULATOR='SER1  device usb:1-1
 emulator-5554  device product:sdk_gphone64'
@@ -465,8 +495,10 @@ expect_contains "the two others are reported" \
   "$DRIVE_OUT" "2 other devices are attached but --serial-2 was not given"
 expect_contains "and so is the list to pick from" "$DRIVE_OUT" "SER2  device usb:1-2"
 expect_no_contains "no two-device banner without --serial-2" "$DRIVE_OUT" "recording 2 devices"
-expect_no_contains "the unchosen phone is never contacted" "$DRIVE_CALLS" "-s SER2 "
-expect_no_contains "and neither is the emulator" "$DRIVE_CALLS" "emulator-5554"
+# Three serials are attached here and one was named, so this can fail: it is a
+# statement about which serials were addressed, not about one that cannot appear.
+expect "only the named serial of the three attached ones is contacted" \
+  "$(serials_touched "$DRIVE_CALLS")" "$SERIAL_A,"
 
 # One device on its own never reaches the device-2 branch at all.
 drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
@@ -576,7 +608,8 @@ unset FAKE_RESOLVE
 # Traced, so this one run also answers which entry point dispatched each step,
 # which nothing else exposes. The call log is unaffected by tracing.
 TRACED=1
-drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --dry-run --steps "$MIXED_STEPS"
+drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --app-id-2 com.other.app \
+  --dry-run --steps "$MIXED_STEPS"
 unset TRACED
 DRY_TRACE="$DRIVE_OUT"
 expect "a dry run over two devices with per-step devices runs" "$DRIVE_RC" "0"
@@ -607,8 +640,16 @@ expect_contains "a dry run names the device a step routed to" "$DRIVE_OUT" \
 # is the same count through the other two entry points.
 expect "the dry run dispatches every step through step_device" \
   "$(count_calls "$DRY_TRACE" '^+ step_device ')" "5"
+# Three: two device 2 dispatches plus the per-device pre-launch below.
 expect "its device 2 steps move the cursor to 2" \
-  "$(count_calls "$DRY_TRACE" '^+ use_device 2$')" "2"
+  "$(count_calls "$DRY_TRACE" '^+ use_device 2$')" "3"
+# The pre-launch has to cover device 2 too, or a device 2 step is driven against
+# whatever that device happened to be showing. With --app-id-2 the two devices
+# host different apps, so this also shows the pre-launch reads the per-device one.
+expect_contains "a dry run pre-launches device 2's app on device 2" "$DRIVE_CALLS" \
+  "-s emulator-5554 shell am start -n com.other.app/.MainActivity"
+expect_contains "and still pre-launches device 1's own app on device 1" "$DRIVE_CALLS" \
+  "-s SER1 shell am start -n com.example.app/.MainActivity"
 # A dry run captures no sound, so it must not touch DND on either device.
 expect "a dry run leaves DND alone" \
   "$(count_calls "$DRIVE_CALLS" 'zen_mode\|set_dnd')" "0"
@@ -623,7 +664,6 @@ expect_contains "and the refusal names the flag that would add it" "$DRIVE_OUT" 
 # refused before its action is dispatched, so its keyevent never goes anywhere.
 expect "nothing was dispatched after the refusal" \
   "$(count_calls "$DRIVE_CALLS" 'input keyevent')" "1"
-expect_no_contains "and no device 2 keyevent was sent" "$DRIVE_CALLS" "-s emulator-5554 "
 
 # The same steps through the recorded path rather than the dry run, which reaches
 # the other two entry points: run_leaf_step and run_steps, not dry_run_steps.
@@ -650,9 +690,31 @@ expect "with no keyevent of its own going to device 2" \
   "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell input keyevent 111')" "0"
 
 # Segments are per (segment, device), and the pump runs in three ordered phases:
-# signal every device, wait for every device, then pull every device. Read the
-# call order out of the log, because collapsing those phases is the bug the
-# ordering exists to prevent and nothing else in the output would show it.
+# signal every device, wait for every device, then pull every device.
+#
+# The adb call log alone cannot order the phases: `wait` is a shell builtin, not
+# an adb call, so the log shows every pkill before every pull whether or not a
+# wait happens in between. The trace can, because it records the wait itself.
+# Each phase appears once per device, so the sequence below is what separates
+# three loops from the two shapes that get it wrong:
+#   wait moved after pull:   signal,signal,pull,pull,wait,wait
+#   wait deleted:            signal,signal,pull,pull
+#   per-device {wait;pull}:  signal,signal,wait,pull,wait,pull
+PUMP_PHASES="$(printf '%s\n' "$RECORDED_TRACE" \
+  | grep -E '^\+ (ADB_FOR [0-9]+ shell pkill -INT screenrecord|ADB_FOR [0-9]+ pull /sdcard/_android_demo_seg|wait [0-9]+)' \
+  | sed -E 's/^\+ ADB_FOR [0-9]+ (shell )?(pkill|pull) .*/\2/; s/^\+ wait [0-9]+.*/wait/' \
+  | tr '\n' ',')"
+expect "the pump signals every device, then waits for all of them, then pulls" \
+  "$PUMP_PHASES" \
+  "pkill,pkill,wait,wait,pull,pull,"
+# The phase sequence above already fails for all three wrong shapes, since only
+# three loops put every wait before every pull. Pin the counts anyway, because a
+# fourth shape that waits more or less often would still be a bug.
+count_occurrences "the wait phase waits once per device" "$PUMP_PHASES" 'wait,' "2"
+count_occurrences "the signal phase signals once per device" "$PUMP_PHASES" 'pkill,' "2"
+count_occurrences "the pull phase pulls once per device" "$PUMP_PHASES" 'pull,' "2"
+# The recorder's own adb calls, in order, as a cross-check that the trace-derived
+# phases describe the same run.
 PUMP_ORDER="$(printf '%s\n' "$DRIVE_CALLS" \
   | grep -E 'screenrecord --bit-rate|pkill -INT screenrecord|pull /sdcard/_android_demo_seg' \
   | sed -E 's/^-s [^ ]+ shell //; s/^-s [^ ]+ //; s/ .*//' | tr '\n' ',')"
@@ -692,6 +754,37 @@ expect_no_contains "and no device is handed back a value it never had" "$DRIVE_C
 expect "a muted device 1 is put back exactly once" \
   "$(count_calls "$DRIVE_CALLS" '-s SER1 shell settings put global zen_mode 0')" "1"
 
+# A `settings get` that answers with something the driver does not recognize is a
+# read result, not a setting: writing it straight back would hand the device a
+# value nobody chose. The stub's GARBAGE serial answers "not-a-zen-mode".
+GARBAGE_PAIR='SER1  device usb:1-1
+GARBAGE  device usb:1-2'
+drive "$GARBAGE_PAIR" "$DEMO" --serial SER1 --serial-2 GARBAGE --no-narration \
+  --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect_contains "a device with an unreadable zen mode is still snapshotted" \
+  "$DRIVE_CALLS" "-s GARBAGE shell settings get global zen_mode"
+expect_contains "and is still muted for the recording" "$DRIVE_CALLS" \
+  "-s GARBAGE shell cmd notification set_dnd on"
+expect_no_contains "but its unreadable value is never written back" \
+  "$DRIVE_CALLS" "-s GARBAGE shell settings put global zen_mode"
+expect_contains "while the device that did answer is still restored" \
+  "$DRIVE_CALLS" "-s SER1 shell settings put global zen_mode 0"
+
+# A pull that fails must cost its own segment, not the whole run. Under set -e an
+# unguarded pull aborts inside stop_segment, the EXIT trap fires, and cleanup()
+# deletes the workdir along with every segment already pulled, so the observable
+# is that the run gets past the pull loop at all.
+NOPULL_PAIR='SER1  device usb:1-1
+NOPULL  device usb:1-2'
+drive "$NOPULL_PAIR" "$DEMO" --serial SER1 --serial-2 NOPULL --no-narration \
+  --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect_contains "a device whose pull fails still gets through the pull loop" \
+  "$DRIVE_OUT" "==> Normalizing 1 recording segment"
+expect_contains "the failure is reported, naming the segment and the device" \
+  "$DRIVE_OUT" "==> WARNING: segment 0 for device 2 was not pulled to"
+expect_contains "and the device that did pull keeps its footage" "$DRIVE_CALLS" \
+  "-s SER1 pull /sdcard/_android_demo_seg_0_1.mp4"
+
 # Every entry point must move the cursor, or a step can run on whichever device
 # the previous one left behind. The three call sites are what make the recorded
 # assertions above hold, so count them in that run's trace. Five steps dispatch
@@ -714,8 +807,6 @@ expect "a single-device run records device 1" \
 expect_contains "and still names its segment per device" "$DRIVE_CALLS" \
   "video/seg_0_1.mp4"
 expect_no_contains "with no second device's segment anywhere" "$DRIVE_CALLS" "seg_0_2.mp4"
-expect_no_contains "and no second device is contacted at all" "$DRIVE_CALLS" "-s emulator-5554 "
-expect_no_contains "nor any serial but the one that was named" "$DRIVE_CALLS" "-s SER2 "
 
 # perform_action reads the bare APP_ID/ACTIVITY, which use_device has already
 # swapped for the cursor's device, so it needs no change of its own. Assert what
@@ -736,11 +827,6 @@ expect_no_contains "and device 1's app is never acted on by a device 2 step" \
   "$DRIVE_CALLS" "force-stop com.example.app"
 expect_no_contains "nor is device 1 ever the target of these three actions" \
   "$DRIVE_CALLS" "-s SER1 shell am "
-# The same three actions read the bare names, so nothing in perform_action names
-# a device. Pin that too, so a future edit cannot quietly hardcode one.
-expect_grep "launch uses the cursor's app id" "$DEMO" 'am force-stop "$APP_ID"'
-expect_grep "launch uses the cursor's activity" "$DEMO" 'am start -n "$ACTIVITY"'
-expect_grep "pm_clear uses the cursor's app id" "$DEMO" 'pm clear "$APP_ID"'
 
 # ------------------------------------------------------------- spec driver paths
 # The demo driver above always passes --serial, so the spec driver's own copy of

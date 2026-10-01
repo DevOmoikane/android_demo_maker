@@ -405,11 +405,18 @@ autorotate_snapshot
 # alarms); each device is restored to whatever it had before, not hardcoded back to 0,
 # so a user who already had their own DND setting doesn't lose it. Restores name
 # their device explicitly rather than following the cursor, whose value at
-# cleanup time is whichever step ran last.
+# cleanup time is whichever step ran last. A value this script does not recognize
+# is not written back at all, the same way autorotate_snapshot treats one: putting
+# an unparseable read back would hand the device a setting nobody chose. "null" is
+# what a device that never set zen_mode reads back, and is a value to restore.
 ZEN_AT_START=("" "")
 if [ "$DRY_RUN" -eq 0 ]; then
   for ((zen_d = 1; zen_d <= DEVICE_COUNT; zen_d++)); do
-    ZEN_AT_START[$((zen_d - 1))]="$(ADB_FOR "$zen_d" shell settings get global zen_mode 2>/dev/null | tr -d '\r' || true)"
+    zen_v="$(ADB_FOR "$zen_d" shell settings get global zen_mode 2>/dev/null | tr -d '\r' || true)"
+    case "$zen_v" in
+      0|1|2|null) ZEN_AT_START[$((zen_d - 1))]="$zen_v" ;;
+      *)          ZEN_AT_START[$((zen_d - 1))]="" ;;
+    esac
     ADB_FOR "$zen_d" shell cmd notification set_dnd on >/dev/null 2>&1 || true
   done
 fi
@@ -701,7 +708,14 @@ dry_run_steps() {
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  ADB shell am start -n "$ACTIVITY" >/dev/null 2>&1 || true
+  # Every device, not just the cursor's: a device 2 step dry-runs against device
+  # 2's screen, so its app has to be on it first or the step is driven against
+  # whatever that device happened to be showing. The cursor is left where the
+  # loop ended, because dry_run_steps points it at each step's own device.
+  for ((pre_d = 1; pre_d <= DEVICE_COUNT; pre_d++)); do
+    use_device "$pre_d"
+    ADB shell am start -n "$ACTIVITY" >/dev/null 2>&1 || true
+  done
   sleep 1
   dry_run_steps "$(cat "$STEPS_FILE")" 0
   echo "==> Dry run complete."
@@ -757,9 +771,11 @@ REC_PID_1=""
 REC_PID_2=""
 
 # Segment files are per (segment, device): seg_0_1.mp4, seg_0_2.mp4. A second
-# recorder's pull must never overwrite the first's.
+# recorder's pull must never overwrite the first's. The index defaults to the
+# current segment, with a literal fallback so the one-argument form is safe even
+# before the SEG_INDEX initializer has run.
 segment_path() {  # segment_path <device> [index]
-  printf '%s/video/seg_%s_%s.mp4' "$WORKDIR" "${2:-$SEG_INDEX}" "$1"
+  printf '%s/video/seg_%s_%s.mp4' "$WORKDIR" "${2:-${SEG_INDEX:-0}}" "$1"
 }
 
 # Every recorder is launched before the sleep, and every recorder is signalled
@@ -780,9 +796,11 @@ start_segment() {
 }
 
 stop_segment() {
-  # pid initialized because the loop body reads it under set -u, and a DEVICE_COUNT
-  # the case below does not cover would otherwise abort the run with no message.
-  local d pid="" waited=0
+  # pid="" so the loop body's [ -n "$pid" ] test cannot trip set -u; a device
+  # with no case arm here gets an empty pid and is skipped rather than re-waiting
+  # the previous device's already-reaped pid. DEVICE_COUNT is 1 or 2 today, so
+  # that is a guard, not a path anything reaches.
+  local d pid="" waited=0 seg_file=""
 
   for ((d = 1; d <= DEVICE_COUNT; d++)); do
     ADB_FOR "$d" shell pkill -INT screenrecord >/dev/null 2>&1 || true
@@ -792,6 +810,7 @@ stop_segment() {
     case "$d" in
       1) pid="$REC_PID_1" ;;
       2) pid="$REC_PID_2" ;;
+      *) pid="" ;;
     esac
     [ -n "$pid" ] || continue
     # kill -INT on the LOCAL "adb shell screenrecord &" pid does not reliably
@@ -813,8 +832,18 @@ stop_segment() {
   sleep 1
 
   for ((d = 1; d <= DEVICE_COUNT; d++)); do
+    seg_file="$(segment_path "$d")"
+    # || true, unlike every other command in these three loops: under set -e a
+    # failed pull would abort the run, the EXIT trap would fire, and cleanup()
+    # would rm -rf the workdir, taking every segment already pulled with it. A
+    # device that dropped off mid-segment must cost its own segment, not the
+    # whole recording.
     ADB_FOR "$d" pull "/sdcard/_android_demo_seg_${SEG_INDEX}_${d}.mp4" \
-      "$(segment_path "$d")" >/dev/null 2>&1
+      "$seg_file" >/dev/null 2>&1 || true
+    # A silent absence is indistinguishable from a short recording, so say which
+    # segment is missing and which device owes it.
+    [ -f "$seg_file" ] || \
+      echo "==> WARNING: segment ${SEG_INDEX} for device ${d} was not pulled to ${seg_file}; that device's footage is missing from this run" >&2
     ADB_FOR "$d" shell rm -f "/sdcard/_android_demo_seg_${SEG_INDEX}_${d}.mp4" >/dev/null 2>&1 || true
   done
 
