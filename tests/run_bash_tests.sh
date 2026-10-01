@@ -29,6 +29,19 @@ expect_contains() { # expect_contains <desc> <haystack> <needle>
   esac
 }
 
+expect_no_contains() { # expect_no_contains <desc> <haystack> <needle>
+  case "$2" in
+    *"$3"*) bail "$1 (unexpected: $3)" ;;
+    *) note "$1" ;;
+  esac
+}
+
+# Extended-regex matcher over a string rather than a file: used to read values
+# out of a traced run, which is not on disk.
+expect_match() { # expect_match <desc> <string> <extended-regex>
+  if printf '%s\n' "$2" | grep -Eq -- "$3"; then note "$1"; else bail "$1 (no match: $3)"; fi
+}
+
 expect_grep() { # expect_grep <desc> <file> <fixed-pattern>
   if grep -q -- "$3" "$2"; then note "$1"; else bail "$1 (no match: $3 in $(basename "$2"))"; fi
 }
@@ -58,7 +71,12 @@ ROT_A="$(mktemp)"
 ROT_B="$(mktemp)"
 printf '0\n' > "$ROT_A"
 printf '1\n' > "$ROT_B"
-trap 'rm -f "$ROT_A" "$ROT_B"' EXIT
+cleanup_test_tmp() {
+  rm -rf "${STUB_DIR:-/nonexistent}" "${CALLS:-/nonexistent}" \
+         "${EMPTY_STEPS:-/nonexistent}" "${EMPTY_SCENARIOS:-/nonexistent}" 2>/dev/null
+  rm -f "$ROT_A" "$ROT_B"
+}
+trap cleanup_test_tmp EXIT
 
 # Raw adb is the only thing stubbed now: the library owns ADB()/ADB_FOR(), so a
 # device-targeted call arrives as `adb -s <serial> <rest>`. Every -s call is
@@ -272,6 +290,183 @@ expect_grep "shared library poll_bounds honors knobs" "$LIB" "POLL_MAX_ATTEMPTS"
 expect_grep "demo sources the shared library" "$DEMO" '^source "\${SCRIPT_DIR}/android-ui-lib\.sh"$'
 expect_grep "spec-test snapshots auto-rotate before steps" "$SPEC" "autorotate_snapshot"
 expect_grep "spec-test restores auto-rotate on exit" "$SPEC" "autorotate_restore; rm -rf"
+
+expect_contains "--serial-2 is documented" "$help_out" "--serial-2"
+expect_contains "--compose-height is documented" "$help_out" "--compose-height"
+rc=0
+"$DEMO" --serial-2 SER2 --app-id-2 com.other.app --compose-height 1440 --help >/dev/null 2>&1 || rc=$?
+expect "second-device flags parse" "$rc" "0"
+
+spec_help="$("$SPEC" --help 2>&1)"
+expect_contains "spec documents --serial-2" "$spec_help" "--serial-2"
+rc=0
+"$SPEC" --serial-2 SER2 --app-id-2 com.other.app --help >/dev/null 2>&1 || rc=$?
+expect "spec second-device flags parse" "$rc" "0"
+
+expect_grep "demo seeds SERIALS" "$DEMO" 'SERIALS=("$SERIAL" "")'
+expect_grep "spec seeds SERIALS" "$SPEC" 'SERIALS=("$SERIAL" "")'
+expect_grep "demo rejects a duplicate second serial" "$DEMO" "--serial-2 is the same device"
+
+# ------------------------------------------------------- second-device resolution
+# Serials, activities and screen sizes are resolved by shelling out to adb, so
+# the only honest way to test that wiring is to hand a driver a fake adb and read
+# back what it asked for. ADB_CALLS logs every call, FAKE_DEVICES is what
+# `adb devices` answers with, and SER1 reports a 1080x2400 screen while any other
+# serial reports 720x1600, so a size read aimed at the wrong device shows up as a
+# wrong number instead of a plausible one.
+STUB_DIR="$(mktemp -d)"
+cat > "$STUB_DIR/adb" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ADB_CALLS"
+if [ "${1:-}" = "devices" ]; then
+  printf 'List of devices attached\n%s\n' "$FAKE_DEVICES"
+  exit 0
+fi
+serial=""
+[ "${1:-}" = "-s" ] && serial="$2"
+case "$*" in
+  *"wm size"*)
+    case "$serial" in
+      SER1) echo "Physical size: 1080x2400" ;;
+      *)    echo "Physical size: 720x1600" ;;
+    esac ;;
+  *resolve-activity*)
+    for last; do :; done
+    printf 'priority=0 preferredOrder=0 match=0x108000\n%s/.MainActivity\n' "$last" ;;
+  *accelerometer_rotation*) echo "1" ;;
+esac
+exit 0
+STUB
+chmod +x "$STUB_DIR/adb"
+CALLS="$(mktemp)"
+EMPTY_STEPS="$(mktemp)"
+EMPTY_SCENARIOS="$(mktemp)"
+printf '[]\n' > "$EMPTY_STEPS"
+printf '[]\n' > "$EMPTY_SCENARIOS"
+
+drive() { # drive <fake-devices> <driver> <driver args...>
+  local runner
+  FAKE_DEVICES="$1"; shift
+  runner="$1"; shift
+  : > "$CALLS"
+  DRIVE_RC=0
+  # TRACED=1 traces the driver so the per-device arrays it builds can be read
+  # back; nothing else exposes them until step dispatch can target device 2.
+  DRIVE_OUT="$(ADB_CALLS="$CALLS" FAKE_DEVICES="$FAKE_DEVICES" PATH="$STUB_DIR:$PATH" \
+               bash ${TRACED:+-x} "$runner" --app-id com.example.app "$@" 2>&1)" || DRIVE_RC=$?
+  DRIVE_CALLS="$(cat "$CALLS")"
+}
+count_calls() { printf '%s\n' "$1" | grep -c -- "$2" | tr -d ' '; }
+
+PHONE_AND_EMULATOR='SER1  device usb:1-1
+emulator-5554  device product:sdk_gphone64'
+TWO_PHONES_AND_EMULATOR='SER1  device usb:1-1
+SER2  device usb:1-2
+emulator-5554  device'
+
+# A lone emulator is a candidate for device 2 even though the primary
+# auto-detect filters emulators out, which is the whole point of the feature.
+drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
+expect "a phone plus one emulator runs" "$DRIVE_RC" "0"
+expect_contains "the lone other device, an emulator, becomes device 2" \
+  "$DRIVE_OUT" "==> recording 2 devices: SER1 and emulator-5554"
+expect "device 2 reaches the library's per-device loop too, on the snapshot and the restore" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell settings get system accelerometer_rotation')" "2"
+expect "device 2's screen size is read from device 2" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell wm size')" "1"
+expect_contains "device 2 hosts the same app by default" "$DRIVE_CALLS" \
+  "-s emulator-5554 shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app"
+
+# Without --serial the primary auto-detect still skips the emulator, and picks
+# the phone, while device 2 adopts it.
+drive "$PHONE_AND_EMULATOR" "$DEMO" --dry-run --steps "$EMPTY_STEPS"
+expect "auto-detect over a phone and an emulator runs" "$DRIVE_RC" "0"
+expect_contains "the primary auto-detect still skips emulators" \
+  "$DRIVE_OUT" "device SER1 (com.example.app/.MainActivity)"
+expect_contains "and that emulator is still adopted as device 2" \
+  "$DRIVE_OUT" "==> recording 2 devices: SER1 and emulator-5554"
+
+# Two phones and no --serial stays fatal, as before.
+drive "$TWO_PHONES_AND_EMULATOR" "$DEMO" --dry-run --steps "$EMPTY_STEPS"
+expect "several phones and no --serial is still fatal" "$DRIVE_RC" "1"
+expect_contains "and still names the flag that disambiguates" \
+  "$DRIVE_OUT" "2 devices connected; pass one with --serial"
+
+# With --serial naming one of them, two others is a reason to stay
+# single-device rather than to guess which one to pair.
+drive "$TWO_PHONES_AND_EMULATOR" "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
+expect "two others still runs, single-device" "$DRIVE_RC" "0"
+expect_contains "the two others are reported" \
+  "$DRIVE_OUT" "2 other devices are attached but --serial-2 was not given"
+expect_contains "and so is the list to pick from" "$DRIVE_OUT" "SER2  device usb:1-2"
+expect_no_contains "no two-device banner without --serial-2" "$DRIVE_OUT" "recording 2 devices"
+expect_no_contains "the unchosen phone is never contacted" "$DRIVE_CALLS" "-s SER2 "
+expect_no_contains "and neither is the emulator" "$DRIVE_CALLS" "emulator-5554"
+
+# One device on its own never reaches the device-2 branch at all.
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --dry-run --steps "$EMPTY_STEPS"
+expect "a lone device runs" "$DRIVE_RC" "0"
+expect_no_contains "a lone device stays a single-device run" "$DRIVE_OUT" "recording 2 devices"
+expect "a lone device reads one screen size" \
+  "$(count_calls "$DRIVE_CALLS" 'shell wm size')" "1"
+
+# An explicit --serial-2 is taken as given, attached or not, so it has to make
+# device 2 live in its own right rather than relying on auto-detection.
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --serial-2 emulator-5554 \
+  --dry-run --steps "$EMPTY_STEPS"
+expect "an explicit --serial-2 runs" "$DRIVE_RC" "0"
+expect_contains "the named serial is device 2, attached or not" \
+  "$DRIVE_OUT" "==> recording 2 devices: SER1 and emulator-5554"
+expect "an explicit --serial-2 reaches the library's per-device loop too" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell settings get system accelerometer_rotation')" "2"
+
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --serial-2 SER1 \
+  --dry-run --steps "$EMPTY_STEPS"
+expect "--serial-2 equal to --serial is refused" "$DRIVE_RC" "1"
+expect_contains "the refusal names the clash" \
+  "$DRIVE_OUT" "--serial-2 is the same device as --serial (SER1)"
+
+# --app-id-2 reaches device 2's resolution without disturbing device 1's.
+drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --app-id-2 com.other.app \
+  --dry-run --steps "$EMPTY_STEPS"
+expect_contains "device 2 resolves the app it was given" \
+  "$DRIVE_CALLS" "-s emulator-5554 shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.other.app"
+expect_contains "device 1 still resolves its own app" \
+  "$DRIVE_CALLS" "-s SER1 shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.example.app"
+
+# What the driver actually resolved for device 2, read off its own trace. These
+# are the array entries use_device() reads, and nothing outside the script can
+# see them until steps can name a device. --activity-2 here as well, so this
+# covers the override path into slot 2 and the query it makes unnecessary.
+TRACED=1
+drive "$PHONE_AND_EMULATOR" "$DEMO" --serial SER1 --app-id-2 com.other.app \
+  --activity-2 .Custom --dry-run --steps "$EMPTY_STEPS"
+unset TRACED
+expect_match "device 2's screen width lands in slot 2" \
+  "$DRIVE_OUT" '^\+* SCREEN_W_BY_DEV\[1\]=720$'
+expect_match "device 2's screen height lands in slot 2" \
+  "$DRIVE_OUT" '^\+* SCREEN_H_BY_DEV\[1\]=1600$'
+expect_match "device 2's app lands in slot 2" \
+  "$DRIVE_OUT" '^\+* APP_BY_DEV\[1\]=com\.other\.app$'
+expect_match "device 2's activity override lands in slot 2" \
+  "$DRIVE_OUT" '^\+* ACTIVITY_BY_DEV\[1\]=com\.other\.app/\.Custom$'
+expect_no_contains "an --activity-2 override skips the query entirely" \
+  "$DRIVE_CALLS" "-s emulator-5554 shell cmd package resolve-activity"
+
+# The spec driver runs the same resolution, so it gets the same treatment.
+drive "$PHONE_AND_EMULATOR" "$SPEC" --serial SER1 --scenarios "$EMPTY_SCENARIOS"
+expect "the spec driver runs two devices" "$DRIVE_RC" "0"
+expect_contains "the spec driver adopts the lone emulator" \
+  "$DRIVE_OUT" "==> recording 2 devices: SER1 and emulator-5554"
+expect "the spec driver reads device 2's screen size" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell wm size')" "1"
+expect_contains "and resolves device 2's activity on device 2" "$DRIVE_CALLS" \
+  "-s emulator-5554 shell cmd package resolve-activity"
+drive "$PHONE_AND_EMULATOR" "$SPEC" --serial SER1 --serial-2 SER2 \
+  --app-id-2 com.other.app --activity-2 .Custom --scenarios "$EMPTY_SCENARIOS"
+expect "an explicit --serial-2 needs no auto-detect" "$DRIVE_RC" "0"
+expect_contains "the spec driver adopts the serial it was given" \
+  "$DRIVE_OUT" "==> recording 2 devices: SER1 and SER2"
 
 # ---------------------------------------------------------------- summary
 echo

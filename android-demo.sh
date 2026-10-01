@@ -41,6 +41,8 @@
 #   ./android-demo.sh --no-narration                  # record video only, silent, skip all TTS/audio work
 #   ./android-demo.sh --keep-workdir                  # don't delete the temp working directory (per-step audio/video) when done
 #   ./android-demo.sh --loose                         # restore the old spaced-out pacing; default packs narration against the action
+#   ./android-demo.sh --serial-2 SERIAL --app-id-2 com.other.app   # record a second phone/emulator and composite both side by side
+#   ./android-demo.sh --compose-height 1440                       # taller composite frame (default 1080)
 #
 # Requires on this machine: adb, jq, and a TTS engine: local Piper neural
 # TTS (the default; https://github.com/rhasspy/piper, noticeably more
@@ -192,6 +194,10 @@ command -v adb >/dev/null 2>&1 || { echo "ERROR: adb not found on PATH" >&2; exi
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq not found on PATH" >&2; exit 1; }
 
 SERIAL=""
+SERIAL_2=""
+APP_ID_2=""
+ACTIVITY_OVERRIDE_2=""
+COMPOSE_HEIGHT=1080
 APP_ID=""
 ACTIVITY_OVERRIDE=""
 STEPS_FILE=""
@@ -215,8 +221,12 @@ usage() {
 while [ $# -gt 0 ]; do
   case "$1" in
     --serial) shift; SERIAL="${1:-}" ;;
+    --serial-2) shift; SERIAL_2="${1:-}" ;;
     --app-id) shift; APP_ID="${1:-}" ;;
+    --app-id-2) shift; APP_ID_2="${1:-}" ;;
     --activity) shift; ACTIVITY_OVERRIDE="${1:-}" ;;
+    --activity-2) shift; ACTIVITY_OVERRIDE_2="${1:-}" ;;
+    --compose-height) shift; COMPOSE_HEIGHT="${1:-1080}" ;;
     --steps) shift; STEPS_FILE="${1:-}" ;;
     --tts) shift; TTS_ENGINE="${1:-}" ;;
     --voice) shift; VOICE="${1:-}" ;;
@@ -262,6 +272,8 @@ load_env_file() {
 load_env_file "$(dirname "$STEPS_FILE")/.env"
 load_env_file "${SCRIPT_DIR}/.env"
 
+# Primary device: unchanged, including the fatal error when several are
+# attached and no --serial says which one.
 if [ -z "$SERIAL" ]; then
   DEVICES="$(adb devices | awk '$2 == "device" && $1 !~ /^emulator-/ {print $1}')"
   count="$(printf '%s\n' "$DEVICES" | sed '/^$/d' | wc -l | tr -d ' ')"
@@ -275,27 +287,63 @@ if [ -z "$SERIAL" ]; then
   fi
   SERIAL="$(printf '%s\n' "$DEVICES" | head -n 1)"
 fi
+
 SERIALS=("$SERIAL" "")
 DEVICE_COUNT=1
 
-# Resolve the launchable activity for APP_ID: explicit --activity wins;
-# otherwise ask the package manager for the MAIN/LAUNCHER intent handler;
-# fall back to the conventional ".MainActivity" if that comes up empty.
-# Asked with a literal adb -s because the library that owns ADB() is sourced
-# below, after the screen size is read.
-if [ -n "$ACTIVITY_OVERRIDE" ]; then
-  case "$ACTIVITY_OVERRIDE" in
-    */*) ACTIVITY="$ACTIVITY_OVERRIDE" ;;
-    *)   ACTIVITY="${APP_ID}/${ACTIVITY_OVERRIDE}" ;;
-  esac
+# Second device. Emulators count here even though the primary auto-detect
+# skips them: "the same app on a phone and an emulator" is exactly the case
+# this exists for. An explicit --serial-2 is taken as given; without one, a
+# single other attached device is adopted, and anything else (none, or two or
+# more) leaves this a single-device run.
+if [ -n "$SERIAL_2" ]; then
+  if [ "$SERIAL_2" = "$SERIAL" ]; then
+    echo "ERROR: --serial-2 is the same device as --serial ($SERIAL)." >&2
+    echo "       Pick a different phone or emulator, or drop --serial-2." >&2
+    exit 1
+  fi
+  SERIALS[1]="$SERIAL_2"
+  DEVICE_COUNT=2
 else
-  brief="$(adb -s "$SERIAL" shell cmd package resolve-activity --brief \
-            -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
-            "$APP_ID" 2>/dev/null | tr -d '\r')"
-  act="$(printf '%s\n' "$brief" | grep "^${APP_ID}/" | head -n 1)"
-  [ -n "$act" ] || act="$(printf '%s\n' "$brief" | grep -m1 '/' || true)"
-  ACTIVITY="${act:-${APP_ID}/.MainActivity}"
+  OTHERS="$(adb devices | awk -v s="$SERIAL" '$2 == "device" && $1 != s {print $1}')"
+  other_count="$(printf '%s\n' "$OTHERS" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [ "$other_count" -eq 1 ]; then
+    SERIALS[1]="$(printf '%s\n' "$OTHERS" | head -n 1)"
+    DEVICE_COUNT=2
+  elif [ "$other_count" -gt 1 ]; then
+    echo "==> $other_count other devices are attached but --serial-2 was not given; recording device 1 only" >&2
+    adb devices | tail -n +2 >&2
+  fi
 fi
+
+# The second device hosts the same app unless told otherwise, which covers the
+# common "same app on two phones" case with only --serial-2.
+[ -n "$APP_ID_2" ] || APP_ID_2="$APP_ID"
+
+# Resolves the launchable activity for a package: an explicit override wins,
+# otherwise ask the package manager for the MAIN/LAUNCHER intent handler, and
+# fall back to the conventional ".MainActivity" if that comes up empty.
+# Takes the serial as an argument rather than following the device cursor: this
+# runs once at setup, before any step picks a device, and has to be able to
+# resolve for either one.
+resolve_activity_for() {
+  local serial="$1" pkg="$2" override="$3" brief act
+  if [ -n "$override" ]; then
+    case "$override" in
+      */*) printf '%s' "$override" ;;
+      *)   printf '%s' "${pkg}/${override}" ;;
+    esac
+    return 0
+  fi
+  brief="$(adb -s "$serial" shell cmd package resolve-activity --brief \
+            -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+            "$pkg" 2>/dev/null | tr -d '\r')"
+  act="$(printf '%s\n' "$brief" | grep "^${pkg}/" | head -n 1)"
+  [ -n "$act" ] || act="$(printf '%s\n' "$brief" | grep -m1 '/' || true)"
+  printf '%s' "${act:-${pkg}/.MainActivity}"
+}
+
+ACTIVITY="$(resolve_activity_for "$SERIAL" "$APP_ID" "$ACTIVITY_OVERRIDE")"
 
 if [ "$NO_NARRATION" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
   command -v ffmpeg >/dev/null 2>&1 || { echo "ERROR: ffmpeg not found on PATH" >&2; exit 1; }
@@ -380,6 +428,15 @@ SCREEN_W_BY_DEV=("$SCREEN_W" "")
 SCREEN_H_BY_DEV=("$SCREEN_H" "")
 APP_BY_DEV=("$APP_ID" "")
 ACTIVITY_BY_DEV=("$ACTIVITY" "")
+
+if [ "$DEVICE_COUNT" -eq 2 ]; then
+  APP_BY_DEV[1]="$APP_ID_2"
+  ACTIVITY_BY_DEV[1]="$(resolve_activity_for "${SERIALS[1]}" "$APP_ID_2" "$ACTIVITY_OVERRIDE_2")"
+  read -r w2 h2 < <(adb -s "${SERIALS[1]}" shell wm size 2>/dev/null | grep -o '[0-9]\+x[0-9]\+' | tail -1 | tr 'x' ' ')
+  SCREEN_W_BY_DEV[1]="${w2:-1080}"
+  SCREEN_H_BY_DEV[1]="${h2:-2400}"
+  echo "==> recording 2 devices: ${SERIALS[0]} and ${SERIALS[1]}" >&2
+fi
 # Points the cursor at device 1 and exports the DEMO_* context exec steps read.
 use_device 1
 
