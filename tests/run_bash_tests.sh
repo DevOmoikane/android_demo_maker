@@ -92,7 +92,8 @@ cleanup_test_tmp() {
   rm -rf "${STUB_DIR:-/nonexistent}" "${CALLS:-/nonexistent}" \
          "${EMPTY_STEPS:-/nonexistent}" "${EMPTY_SCENARIOS:-/nonexistent}" \
          "${LAUNCH_SCENARIOS:-/nonexistent}" "${MIXED_STEPS:-/nonexistent}" \
-         "${SIMPLE_STEPS:-/nonexistent}" "${APP2_STEPS:-/nonexistent}" 2>/dev/null
+         "${SIMPLE_STEPS:-/nonexistent}" "${APP2_STEPS:-/nonexistent}" \
+         "${MIXED_SCENARIOS:-/nonexistent}" 2>/dev/null
   rm -f "$ROT_A" "$ROT_B"
 }
 trap cleanup_test_tmp EXIT
@@ -572,6 +573,7 @@ LAUNCH_SCENARIOS="$(mktemp)"
 MIXED_STEPS="$(mktemp)"
 SIMPLE_STEPS="$(mktemp)"
 APP2_STEPS="$(mktemp)"
+MIXED_SCENARIOS="$(mktemp)"
 printf '[]\n' > "$EMPTY_STEPS"
 printf '[]\n' > "$EMPTY_SCENARIOS"
 # One scenario that launches, so the resolved activity is visible as the
@@ -599,6 +601,59 @@ printf '[{"action":"back"},{"action":"dismiss_keyboard"}]\n' > "$SIMPLE_STEPS"
 # Every action perform_action routes through the bare APP_ID/ACTIVITY, on a
 # device 2 step, so the cursor's app is what gets asked for.
 printf '[{"action":"launch","device":2},{"action":"pm_clear","device":2},{"action":"reopen","device":2}]\n' > "$APP2_STEPS"
+# The spec driver's own dispatch, as scenarios rather than steps. Which serial a
+# command reached is the only honest read on which device the driver dispatched a
+# step to, so every step here does something the adb call log can tell apart, and
+# each is placed so that "dispatched to its own device" and "left the cursor where
+# the previous step left it" produce different logs:
+#   s0  back, no device              -> device 1
+#   s1  if, device 2                 -> its screen condition is read from device 2
+#       (the cursor is on device 1 going in, so an undispatched if reads device 1)
+#   s1.then tap_xy 5 6, device 1     -> never runs: "Login" is never on screen
+#   s1.else tap_xy 7 8, device 1     -> device 1, although its if named device 2,
+#                                        so a branch step dispatches on its own
+#   s2  exec, no device              -> device 1's exec slot is what now holds it
+#   s3  dismiss_keyboard, no device  -> device 1, right after device 2 steps above
+#   s4  if, device 2                 -> device 2's exec slot is EMPTY, so the else
+#                                        arm runs. On device 1 it would read the
+#                                        exec s2 just ran there, and take the then
+#   s4.then home_button, device 2    -> never runs
+#   s4.else tap_xy 11 12, device 2   -> device 2, so a branch step routed on its
+#                                        own device rather than its if's
+#   s5  exec, device 2               -> device 2's exec slot now holds it
+#   s6  if, device 2                 -> reads that, so the THEN arm runs; on
+#                                        device 1 it would read s2 and take the
+#                                        then arm too, but s6.then's action would
+#                                        then land on device 1
+#   s6.then home_button, device 2    -> device 2, inside the taken branch
+#   s6.else launch                   -> never runs
+#   s7  pm_clear, device 2           -> device 2's own app
+#   s8  pm_clear, no device          -> device 1 and device 1's own app
+# A second scenario, so the first failing still leaves this one to run: a step
+# that fails must fail its own scenario, which is this driver's whole contract.
+cat > "$MIXED_SCENARIOS" <<'JSON'
+[
+  {"name":"routes each step to its device",
+   "steps":[
+     {"action":"back","settle_ms":0},
+     {"action":"if","device":2,"source":"screen","text":"Login","timeout_seconds":0,
+      "then":[{"action":"tap_xy","x":5,"y":6,"device":1}],
+      "else":[{"action":"tap_xy","x":7,"y":8,"device":1}]},
+     {"action":"exec","command":"echo exec ran on $DEMO_SERIAL"},
+     {"action":"dismiss_keyboard","settle_ms":0},
+     {"action":"if","device":2,
+      "then":[{"action":"home_button","device":2}],
+      "else":[{"action":"tap_xy","x":11,"y":12,"device":2}]},
+     {"action":"exec","device":2,"command":"echo exec ran on $DEMO_SERIAL"},
+     {"action":"if","device":2,
+      "then":[{"action":"home_button","device":2}],
+      "else":[{"action":"launch"}]},
+     {"action":"pm_clear","device":2},
+     {"action":"pm_clear","settle_ms":0}
+   ]},
+  {"name":"runs after a failed scenario","steps":[{"action":"back","settle_ms":0}]}
+]
+JSON
 
 drive() { # drive <fake-devices> <driver> <driver args...>
   local runner
@@ -1183,6 +1238,127 @@ expect "a non-matching resolve answer still runs" "$DRIVE_RC" "0"
 expect_contains "and takes the one component that came back" "$DRIVE_CALLS" \
   "shell am start -n com.other.vendor/.DeepLink"
 unset FAKE_RESOLVE
+
+# ------------------------------------------------- spec per-step device dispatch
+# The spec driver reaches a device only through the cursor, so "the step named
+# device 2" is only true if the driver moved that cursor before dispatching. The
+# adb call log is what settles it: every step in MIXED_SCENARIOS does something
+# distinguishable, and each is placed where inheriting the previous step's device
+# would move its command to a different serial and break a count. Traced as well,
+# so the same run also says how many steps went through step_device, which nothing
+# else exposes.
+TRACED=1
+drive "$PHONE_AND_EMULATOR" "$SPEC" --serial SER1 --app-id-2 com.other.app \
+  --scenarios "$MIXED_SCENARIOS"
+unset TRACED
+SPEC_TRACE="$DRIVE_OUT"
+expect "a spec run with per-step devices passes" "$DRIVE_RC" "0"
+
+# The device 2 leaves. Each asserts the wrong serial too, since a step that ran on
+# both would satisfy the first half alone.
+expect "a device 2 step reaches device 2" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell input keyevent KEYCODE_HOME')" "1"
+expect "and never device 1" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell input keyevent KEYCODE_HOME')" "0"
+expect "the if's own device is what routes its condition" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell uiautomator dump')" "1"
+expect "and device 1 is not read for it" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell uiautomator dump')" "0"
+# perform_action reads the bare APP_ID/ACTIVITY, which use_device has swapped for
+# the cursor's device, so a device 2 step acts on device 2's app without
+# perform_action knowing anything about devices.
+expect "a device 2 step acts on device 2's own app" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell pm clear com.other.app')" "1"
+expect "a step naming no device acts on device 1's own app" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell pm clear com.example.app')" "1"
+expect_no_contains "and no device 2 step ever touched device 1's app" \
+  "$DRIVE_CALLS" "-s emulator-5554 shell pm clear com.example.app"
+expect_no_contains "nor device 1's step touched device 2's app" \
+  "$DRIVE_CALLS" "-s SER1 shell pm clear com.other.app"
+# A step that follows a device 2 step must not stay on device 2. s3's
+# dismiss_keyboard names no device and lands between two device 2 steps, so an
+# inherited cursor sends it to emulator-5554 instead of SER1.
+expect "a step with no device field runs on the first, not the last step's device" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell input keyevent 111')" "1"
+expect "and no such step reached device 2" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell input keyevent 111')" "0"
+# A step inside a branch dispatches on its own device, not the if's. Both branch
+# directions are pinned, because one of them on its own could pass by luck:
+#   s1.else names device 1 while its if named device 2, so an if-only dispatch
+#        sends this tap to device 2
+#   s4.else names device 2 while its if named device 2, so only the step's own
+#        field puts it there. It runs at all only if the if read device 2's EMPTY
+#        exec slot, since s2's exec ran on device 1.
+# The untaken arms are asserted absent, so the two runs cannot be told apart by
+# the wrong branch having quietly run.
+expect "a branch step on device 1 runs there, though its if named device 2" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell input tap 7 8')" "1"
+expect "and never on the if's device" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell input tap 7 8')" "0"
+expect "a branch step on device 2 runs there too" \
+  "$(count_calls "$DRIVE_CALLS" '-s emulator-5554 shell input tap 11 12')" "1"
+expect "and never on device 1" \
+  "$(count_calls "$DRIVE_CALLS" '-s SER1 shell input tap 11 12')" "0"
+expect "the untaken then arm's home_button is the only one that ran" \
+  "$(count_calls "$DRIVE_CALLS" 'shell input keyevent KEYCODE_HOME')" "1"
+expect "and the untaken else arm's launch never ran at all" \
+  "$(count_calls "$DRIVE_CALLS" 'shell am force-stop')" "0"
+# The last if takes its then arm because s5 ran an exec on device 2; that arm's
+# step names device 2, so the count above pins the branch that ran as much as the
+# device it ran on. Read the decision off the run's own output lines rather than
+# the trace, since bash -x echoes each line a second time behind a "+ ".
+expect "an if on device 2 reads that device's exec output and takes the then arm" \
+  "$(printf '%s\n' "$DRIVE_OUT" | grep -c '(condition met -> then-branch)' \
+     | awk '{print int($1 / 2)}')" "1"
+# Both exec steps read the DEMO_* context of the device they name, and one of them
+# names no device, so an inherited cursor or a hardcoded serial shows up as a
+# second serial in the run's own output (do_exec_step prefixes it with "     | ").
+expect "an exec step reads the exec context of the device it names" \
+  "$(printf '%s\n' "$DRIVE_OUT" | sed -n 's/^ *| exec ran on //p' | sort -u | tr '\n' ',')" \
+  "emulator-5554,SER1,"
+# Every step goes through step_device, or one runs on whichever device the step
+# before it left behind. Thirteen steps dispatch in this run: nine top-level
+# steps, the two branch steps, and the second scenario's one step. Seven of them
+# name device 2 (the three ifs, the device 2 exec, the two device 2 branch steps
+# and the device 2 pm_clear), and those seven are the use_device 2 calls.
+expect "every spec step calls step_device" \
+  "$(count_calls "$SPEC_TRACE" '^+ step_device ')" "13"
+expect "and the device 2 steps move the cursor to 2" \
+  "$(count_calls "$SPEC_TRACE" '^+ use_device 2$')" "7"
+expect_contains "the step echo names the device a step routed to" "$DRIVE_OUT" \
+  "-- step 7: pm_clear  [device 2]"
+expect_no_contains "and a step naming no device carries no device marker" "$DRIVE_OUT" \
+  "-- step 8: pm_clear  ["
+expect_contains "and the branch's step echo names its own" "$DRIVE_OUT" \
+  "-- step 4.e.0: tap_xy  [device 2]"
+expect_contains "and an if's own echo names its device" "$DRIVE_OUT" \
+  "-- step 4: if  [device 2]"
+expect_contains "and so does an exec step's" "$DRIVE_OUT" \
+  "-- step 5: exec  [device 2]"
+
+# A device the run never attached is refused before anything is asked of it, and
+# the refusal costs its own scenario rather than the run: MIXED_SCENARIOS' second
+# scenario still executes and passes, and the first is reported as the failure.
+drive 'SER1  device usb:1-1' "$SPEC" --serial SER1 --app-id-2 com.other.app \
+  --scenarios "$MIXED_SCENARIOS"
+expect "a device 2 step in a single-device spec run is refused" "$DRIVE_RC" "1"
+expect_contains "and the refusal names the flag that would add the device" \
+  "$DRIVE_OUT" "--serial-2"
+expect_contains "the failing scenario is reported, with its step" "$DRIVE_OUT" \
+  "routes each step to its device -- failed at step 1 (if)"
+expect_contains "and the scenario after it still ran" "$DRIVE_OUT" \
+  "runs after a failed scenario"
+expect "which passed, rather than being skipped or failed" \
+  "$(printf '%s\n' "$DRIVE_OUT" | grep -c '=> PASS')" "1"
+# Only s0 ran. s1 names device 2 and is refused before its condition is read, so
+# nothing was ever asked of the absent device, and no adb call carries an empty
+# serial (which is how a refusal that came too late would look).
+expect "the refused step's condition was never read anywhere" \
+  "$(count_calls "$DRIVE_CALLS" 'shell uiautomator dump')" "0"
+expect "and the one step before it still ran" \
+  "$(count_calls "$DRIVE_CALLS" 'shell input keyevent KEYCODE_BACK')" "2"
+expect "nothing was asked of a device with no serial" \
+  "$(serials_touched "$DRIVE_CALLS")" "$SERIAL_A,"
 
 # ---------------------------------------------------------------- summary
 echo

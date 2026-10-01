@@ -492,25 +492,37 @@ perform_action() {
 # run_step_list <json-array> <id-prefix> - walks a scenario's steps in order.
 # An "if" step evaluates its condition (via eval_condition, shared with
 # android-demo.sh) and recurses into just the taken branch; anything else
-# (including "exec") runs through perform_action. Sets RUN_FAILED_ID/
-# RUN_FAILED_ACTION/RUN_FAILED_ERROR and returns 1 on the first failure --
-# nested ids look like "3.t.1" (step 3's then-branch, its 2nd step), same
-# convention android-demo.sh uses so a failure is easy to find in the file.
+# (including "exec") runs through perform_action. Each step first goes through
+# step_device, so the step's own "device" field routes all three of those paths
+# and a step naming none runs on device 1 rather than inheriting. Sets
+# RUN_FAILED_ID/RUN_FAILED_ACTION/RUN_FAILED_ERROR and returns 1 on the first
+# failure -- nested ids look like "3.t.1" (step 3's then-branch, its 2nd step),
+# same convention android-demo.sh uses so a failure is easy to find in the file.
 RUN_FAILED_ID=""
 RUN_FAILED_ACTION=""
 RUN_FAILED_ERROR=""
 run_step_list() {
   local arr="$1" prefix="$2"
-  local n i step action id settle_ms out rc branch
+  local n i step action id dev settle_ms out rc branch
 
   n="$(jq 'length' <<<"$arr")"
   for ((i = 0; i < n; i++)); do
     step="$(jq -c ".[$i]" <<<"$arr")"
     action="$(jq -r '.action' <<<"$step")"
     id="${prefix}${i}"
+    dev="$(jq -r '.device // empty' <<<"$step")"
+    # The one dispatch point for every path below: eval_condition, the exec
+    # special case and perform_action all reach the device through the cursor,
+    # so pointing it here means none of them can miss the step's own device.
+    if ! step_device "$step"; then
+      RUN_FAILED_ID="$id"; RUN_FAILED_ACTION="$action"
+      RUN_FAILED_ERROR="'device' must be 1 or 2, and this run must have that device attached; see the message above"
+      echo "  !! FAILED at step ${id} (${action}): ${RUN_FAILED_ERROR}" >&2
+      return 1
+    fi
 
     if [ "$action" = "if" ]; then
-      echo "  -- step ${id}: if"
+      echo "  -- step ${id}: if${dev:+  [device ${dev}]}"
       rc=0
       out="$(eval_condition "$step" 2>&1)" || rc=$?
       [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/     /'
@@ -533,7 +545,7 @@ run_step_list() {
       # to read, and a command substitution would run it in a subshell,
       # discarding those before this function's caller ever sees them. Its
       # own echoes already print the command/output/exit status live.
-      echo "  -- step ${id}: exec"
+      echo "  -- step ${id}: exec${dev:+  [device ${dev}]}"
       if ! perform_action "exec" "$step"; then
         RUN_FAILED_ID="$id"; RUN_FAILED_ACTION="exec"
         RUN_FAILED_ERROR="exec command failed (exit ${LAST_EXEC_STATUS:-?}); see console output above"
@@ -544,7 +556,7 @@ run_step_list() {
       continue
     fi
 
-    echo "  -- step ${id}: ${action}"
+    echo "  -- step ${id}: ${action}${dev:+  [device ${dev}]}"
     if ! out="$(perform_action "$action" "$step" 2>&1)"; then
       RUN_FAILED_ID="$id"; RUN_FAILED_ACTION="$action"; RUN_FAILED_ERROR="$out"
       echo "  !! FAILED at step ${id} (${action}): ${out}" >&2
