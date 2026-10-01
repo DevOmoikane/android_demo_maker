@@ -48,6 +48,9 @@ at_least() { # at_least <desc> <actual> <minimum>
   if [ "$2" -ge "$3" ] 2>/dev/null; then note "$1"; else bail "$1 (got: $2, want: >= $3)"; fi
 }
 
+# The workdir a run kept, which is where its pulled segments are.
+kept_workdir() { printf '%s\n' "$1" | sed -n 's/^==> Keeping workdir: //p'; }
+
 # Occurrences of a substring inside a single string, for a value that is one
 # comma-joined line rather than a list.
 count_occurrences() { # count_occurrences <desc> <string> <substring> <expected>
@@ -374,25 +377,31 @@ case "$*" in
       for last; do :; done
       printf 'priority=0 preferredOrder=0 match=0x108000\n%s/.MainActivity\n' "$last"
     fi ;;
-  # Per device, so a test can tell a per-device restore from a hardcoded one:
-  # device 1 reports 0 (DND off, must end up off) and every other serial
-  # reports 2 (total silence, must be handed back as 2, not flattened to 0).
-  # GARBAGE reports something the driver does not recognize, which is a read
-  # result and must never be written back.
+  # One serial per value the driver has to handle, so a restore that drops any
+  # of them is visible: 0 off, 1 important interruptions, 2 total silence,
+  # 3 alarms only, null for a device that never set it, and GARBAGE for a read
+  # the driver must refuse to write back.
   *"get global zen_mode"*)
     case "$serial" in
       SER1) echo "0" ;;
+      ZEN1) echo "1" ;;
+      ZEN3) echo "3" ;;
+      ZENNULL) echo "null" ;;
       GARBAGE) echo "not-a-zen-mode" ;;
       *) echo "2" ;;
     esac ;;
   *accelerometer_rotation*) echo "1" ;;
-  # A serial whose segment pull fails, the way a device that dropped off
-  # mid-segment does. Only the pull fails; everything else on that serial works.
+  # A real pull writes the destination, and the driver checks for that file, so a
+  # stub that did not would make every device in every run look like a failed
+  # pull. NOPULL fails the way a device that dropped off mid-segment does: the
+  # pull itself fails and no file appears.
   *pull*_android_demo_seg*)
     if [ "$serial" = "NOPULL" ]; then
       echo "adb: error: failed to stat remote object" >&2
       exit 1
-    fi ;;
+    fi
+    for last; do :; done
+    : > "$last" ;;
 esac
 exit 0
 STUB
@@ -754,36 +763,72 @@ expect_no_contains "and no device is handed back a value it never had" "$DRIVE_C
 expect "a muted device 1 is put back exactly once" \
   "$(count_calls "$DRIVE_CALLS" '-s SER1 shell settings put global zen_mode 0')" "1"
 
-# A `settings get` that answers with something the driver does not recognize is a
-# read result, not a setting: writing it straight back would hand the device a
-# value nobody chose. The stub's GARBAGE serial answers "not-a-zen-mode".
-GARBAGE_PAIR='SER1  device usb:1-1
-GARBAGE  device usb:1-2'
-drive "$GARBAGE_PAIR" "$DEMO" --serial SER1 --serial-2 GARBAGE --no-narration \
+# A value the driver drops is not a small thing: cleanup skips the restore, so
+# the phone is left in Do Not Disturb after the demo. AOSP zen_mode has four
+# values plus null, and every one of them is a state a user can be in, so each
+# gets its own serial here and its own assertion that the value comes back.
+# The 0 and 2 cases are the ones already asserted above; these are 1, 3 and null.
+drive 'ZEN1  device usb:1-1
+ZEN3  device usb:1-2' "$DEMO" --serial ZEN1 --serial-2 ZEN3 --no-narration \
   --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect_contains "a phone in important-interruptions-only is put back to 1" \
+  "$DRIVE_CALLS" "-s ZEN1 shell settings put global zen_mode 1"
+expect_contains "a phone in alarms-only is put back to 3" \
+  "$DRIVE_CALLS" "-s ZEN3 shell settings put global zen_mode 3"
+expect "both were muted for the recording" \
+  "$(count_calls "$DRIVE_CALLS" 'shell cmd notification set_dnd on')" "2"
+
+# null is what a phone that never set zen_mode reads back, and it is still a
+# value to restore. GARBAGE is the other half of the same run: a read the driver
+# does not recognize is not a setting, so it must not be written back.
+drive 'ZENNULL  device usb:1-1
+GARBAGE  device usb:1-2' "$DEMO" --serial ZENNULL --serial-2 GARBAGE \
+  --no-narration --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect_contains "a phone that never set zen_mode is put back to null" \
+  "$DRIVE_CALLS" "-s ZENNULL shell settings put global zen_mode null"
 expect_contains "a device with an unreadable zen mode is still snapshotted" \
   "$DRIVE_CALLS" "-s GARBAGE shell settings get global zen_mode"
 expect_contains "and is still muted for the recording" "$DRIVE_CALLS" \
   "-s GARBAGE shell cmd notification set_dnd on"
 expect_no_contains "but its unreadable value is never written back" \
   "$DRIVE_CALLS" "-s GARBAGE shell settings put global zen_mode"
-expect_contains "while the device that did answer is still restored" \
-  "$DRIVE_CALLS" "-s SER1 shell settings put global zen_mode 0"
 
 # A pull that fails must cost its own segment, not the whole run. Under set -e an
 # unguarded pull aborts inside stop_segment, the EXIT trap fires, and cleanup()
 # deletes the workdir along with every segment already pulled, so the observable
-# is that the run gets past the pull loop at all.
+# is the one the driver acts on: which device's segment is missing afterwards.
+# The stub writes the destination on a successful pull, so the warning names
+# exactly the device whose pull failed and no other.
 NOPULL_PAIR='SER1  device usb:1-1
 NOPULL  device usb:1-2'
 drive "$NOPULL_PAIR" "$DEMO" --serial SER1 --serial-2 NOPULL --no-narration \
   --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
-expect_contains "a device whose pull fails still gets through the pull loop" \
-  "$DRIVE_OUT" "==> Normalizing 1 recording segment"
-expect_contains "the failure is reported, naming the segment and the device" \
-  "$DRIVE_OUT" "==> WARNING: segment 0 for device 2 was not pulled to"
-expect_contains "and the device that did pull keeps its footage" "$DRIVE_CALLS" \
-  "-s SER1 pull /sdcard/_android_demo_seg_0_1.mp4"
+NOPULL_WD="$(kept_workdir "$DRIVE_OUT")"
+expect "the failing device's segment is reported missing, by name" \
+  "$(printf '%s\n' "$DRIVE_OUT" | grep -c '==> WARNING: segment 0 for device 2 was not pulled to')" "1"
+expect_no_contains "and the device that did pull is not reported missing" \
+  "$DRIVE_OUT" "device 1 was not pulled"
+expect "the run still got past the pull loop" \
+  "$(printf '%s\n' "$DRIVE_OUT" | grep -c '==> Normalizing')" "1"
+[ -f "$NOPULL_WD/video/seg_0_1.mp4" ] \
+  && note "the device that did pull keeps its footage" \
+  || bail "the device that did pull lost its segment"
+[ -f "$NOPULL_WD/video/seg_0_2.mp4" ] \
+  && bail "the device whose pull failed still has a segment file" \
+  || note "the failed pull left no segment file behind"
+
+# With the stub writing the destination on every successful pull, a run where
+# every pull works has nothing to report. This is what keeps the warning above
+# meaningful: a stub that never wrote the file would make it fire for every
+# device in every run, and then the failing case would be indistinguishable.
+drive 'SER1  device usb:1-1
+SER2  device usb:1-2' "$DEMO" --serial SER1 --serial-2 SER2 --no-narration \
+  --steps "$SIMPLE_STEPS" --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect_no_contains "a run whose every pull succeeds reports nothing" \
+  "$DRIVE_OUT" "==> WARNING: segment"
+CLEAN_WD="$(kept_workdir "$DRIVE_OUT")"
+expect "both segments landed on disk" \
+  "$(ls "$CLEAN_WD/video" 2>/dev/null | grep -c 'seg_0_[12]\.mp4' || true)" "2"
 
 # Every entry point must move the cursor, or a step can run on whichever device
 # the previous one left behind. The three call sites are what make the recorded

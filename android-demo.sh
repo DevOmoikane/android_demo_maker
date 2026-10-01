@@ -407,15 +407,19 @@ autorotate_snapshot
 # their device explicitly rather than following the cursor, whose value at
 # cleanup time is whichever step ran last. A value this script does not recognize
 # is not written back at all, the same way autorotate_snapshot treats one: putting
-# an unparseable read back would hand the device a setting nobody chose. "null" is
-# what a device that never set zen_mode reads back, and is a value to restore.
+# an unparseable read back would hand the device a setting nobody chose. The
+# accepted set is every value AOSP zen_mode has, 0 off / 1 important
+# interruptions / 2 total silence / 3 alarms only, plus "null" which is what a
+# device that never set zen_mode reads back. A legitimate value missing from
+# this set is worse than no validation at all: cleanup would skip the restore
+# and leave the phone in Do Not Disturb after the demo.
 ZEN_AT_START=("" "")
 if [ "$DRY_RUN" -eq 0 ]; then
   for ((zen_d = 1; zen_d <= DEVICE_COUNT; zen_d++)); do
     zen_v="$(ADB_FOR "$zen_d" shell settings get global zen_mode 2>/dev/null | tr -d '\r' || true)"
     case "$zen_v" in
-      0|1|2|null) ZEN_AT_START[$((zen_d - 1))]="$zen_v" ;;
-      *)          ZEN_AT_START[$((zen_d - 1))]="" ;;
+      0|1|2|3|null) ZEN_AT_START[$((zen_d - 1))]="$zen_v" ;;
+      *)            ZEN_AT_START[$((zen_d - 1))]="" ;;
     esac
     ADB_FOR "$zen_d" shell cmd notification set_dnd on >/dev/null 2>&1 || true
   done
