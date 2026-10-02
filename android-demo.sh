@@ -124,6 +124,11 @@
 #   narration     text to speak for this step (optional; omit for a silent
 #                 beat). Every step's on-screen dwell time is at least this
 #                 line's spoken length, so video and narration stay in sync.
+#   device        1 (the default) or 2: which attached device this step runs
+#                 on, so one file can drive a phone and an emulator together.
+#                 Omitted means device 1, and nothing inherits from an earlier
+#                 step, so a step inside an if branch needs its own too. Device
+#                 2 exists only when a second one is attached (--serial-2).
 #
 #   exec: run an external command on this machine and wait for it to finish.
 #   command       required; the command text. Multiline is fine (newlines

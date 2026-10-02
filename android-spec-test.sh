@@ -55,6 +55,10 @@
 # to a seeder invoked as "<script> <child_id> <domain...>"; prefer a plain
 # exec step otherwise.
 #
+# Step fields: every step also takes "device", 1 (the default) or 2, naming
+# which attached device it runs on. It applies inside if branches too, where
+# each nested step needs its own.
+#
 # Step actions: everything android-demo.sh supports (see its own --help),
 # including the gestures (long_press, double_tap, swipe_element, extended
 # swipe directions, drag_and_drop),
@@ -129,7 +133,7 @@ SCENARIOS_FILE=""
 ONLY=""
 REPORT=""
 
-usage() { sed -n '2,112p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,118p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in

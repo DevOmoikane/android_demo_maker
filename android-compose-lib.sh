@@ -62,9 +62,10 @@ pane_width_for() {  # pane_width_for <screen_w> <screen_h> <height>
 # widths. Two 1080x2400 phones at 1080 give 972x1080, which is a near-square
 # frame: that is the honest consequence of putting two portrait screens side by
 # side. The shape comes from the devices, not from COMPOSE_HEIGHT: a pane is as
-# wide as its screen's aspect ratio makes it at that height, so every height
-# keeps the same shape and only the resolution moves (488x540, 972x1080 and
-# 1296x1440 are the same 0.9 frame at 540, 1080 and 1440).
+# wide as its screen's aspect ratio makes it at that height, so the frame keeps
+# these proportions at every height and the height moves only the resolution
+# (488x540, 972x1080 and 1296x1440 for two 1080x2400 phones are all about 0.9
+# as wide as they are tall, within the even-width rounding above).
 build_compose_geometry() {  # build_compose_geometry <height>
   local h="$1" d i w=0
   h=$(( h - (h % 2) ))

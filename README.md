@@ -60,19 +60,19 @@ single-device run.
 ## Layout
 
 ```
-android-demo.sh      the demo driver: narrated screen recording
-android-spec-test.sh the spec-test driver: unattended assertions + coverage
-android-ui-lib.sh    shared adb/uiautomator driving code for both scripts
+android-demo.sh        the demo driver: narrated screen recording
+android-spec-test.sh   the spec-test driver: unattended assertions + coverage
+android-ui-lib.sh      shared adb/uiautomator driving code for both scripts
 android-compose-lib.sh video geometry and ffmpeg filter graph for two-device recordings
-android-spec-tests/  example scenario file (point the Spec Tests tab here
-                     or at your own directory)
-setup.sh / run.sh    bootstrap and launcher
-demo_maker/          stdlib-only backend package
-web/                 static frontend (vanilla JS)
-tests/               unittest suite for the backend (python -m unittest discover -s tests)
-                     plus tests/run_bash_tests.sh for the shell drivers/ui-lib logic
-example-steps.json   sample tour exercising most actions, including a second device
-piper-voices/        Piper models used by --tts piper
+android-spec-tests/    example scenario file (point the Spec Tests tab here
+                       or at your own directory)
+setup.sh / run.sh      bootstrap and launcher
+demo_maker/            stdlib-only backend package
+web/                   static frontend (vanilla JS)
+tests/                 unittest suite for the backend (python -m unittest discover -s tests)
+                       plus tests/run_bash_tests.sh for the shell drivers/ui-lib logic
+example-steps.json     sample tour exercising most actions, including a second device
+piper-voices/          Piper models used by --tts piper
 ```
 
 ## Platform notes
