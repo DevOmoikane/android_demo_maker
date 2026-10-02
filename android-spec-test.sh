@@ -133,7 +133,14 @@ SCENARIOS_FILE=""
 ONLY=""
 REPORT=""
 
-usage() { sed -n '2,118p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() {
+  # Print the leading comment block (everything after the shebang until the
+  # first non-comment line), stripped of the "# " prefix. Same derivation as
+  # android-demo.sh, and deliberately not a line range: this block documents
+  # the file format, and a range that fell behind it dropped the last two
+  # documented fields from --help without anything failing.
+  awk 'NR > 1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in

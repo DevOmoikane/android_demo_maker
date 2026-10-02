@@ -479,12 +479,33 @@ expect_grep "spec-test restores auto-rotate on exit" "$SPEC" "autorotate_restore
 
 expect_contains "--serial-2 is documented" "$help_out" "--serial-2"
 expect_contains "--compose-height is documented" "$help_out" "--compose-height"
+# The device field is the one per-step field neither driver's help used to
+# document, and it is the field the second-device feature turns on. Nothing else
+# here reads --help, so without these two it could go missing again unnoticed.
+# Matched with a regex rather than a fixed substring so that rewrapping the
+# comment does not redden them over cosmetics.
+expect_match "the device step field is documented in --help" \
+  "$help_out" '^  device +1 \(the default\) or 2'
 rc=0
 "$DEMO" --serial-2 SER2 --app-id-2 com.other.app --compose-height 1440 --help >/dev/null 2>&1 || rc=$?
 expect "second-device flags parse" "$rc" "0"
 
 spec_help="$("$SPEC" --help 2>&1)"
 expect_contains "spec documents --serial-2" "$spec_help" "--serial-2"
+expect_match "spec documents the device step field" \
+  "$spec_help" '^Step fields: .*"device"'
+# The spec driver's help is derived from its comment block instead of a line
+# range, and this is what holds it to that. A hard-coded range there fell two
+# lines behind the block once and quietly dropped the last two documented
+# fields from --help while every other assertion stayed green. The count
+# compares the script's own output against a fresh scan of the file; the
+# contains pins the block's last line directly, with no scan involved, so the
+# pair fails even if the two scans were to agree on the wrong thing.
+expect "the spec driver's help covers its whole comment block" \
+  "$("$SPEC" --help 2>&1 | wc -l | tr -d ' ')" \
+  "$(awk 'NR > 1 && $0 !~ /^#/ {exit} NR > 1 {print}' "$SPEC" | wc -l | tr -d ' ')"
+expect_contains "and reaches the block's last documented line" \
+  "$spec_help" "then, else    arrays of steps (may nest more ifs)"
 rc=0
 "$SPEC" --serial-2 SER2 --app-id-2 com.other.app --help >/dev/null 2>&1 || rc=$?
 expect "spec second-device flags parse" "$rc" "0"
