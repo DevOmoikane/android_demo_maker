@@ -2,10 +2,18 @@
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Dict
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+# The server is a ThreadingHTTPServer, so two requests can interleave inside
+# update_settings or add_recent: both read the same file, both write, and the
+# second write discards the first's changes. Every read-modify-write of the
+# settings file goes through this lock, so a concurrent PUT can no longer lose
+# a key another PUT just wrote.
+_SETTINGS_LOCK = threading.Lock()
 
 
 def app_support_dir() -> Path:
@@ -101,32 +109,34 @@ def save_settings(settings: Dict[str, object]) -> None:
 
 
 def update_settings(partial: Dict[str, object]) -> Dict[str, object]:
-    settings = load_settings()
-    clean = {}
-    for key, value in partial.items():
-        if key not in DEFAULTS:
-            continue
-        if key in _BOOL_KEYS:
-            clean[key] = bool(value)
-        elif key in _INT_KEYS:
-            try:
-                clean[key] = int(value)
-            except (TypeError, ValueError):
+    with _SETTINGS_LOCK:
+        settings = load_settings()
+        clean = {}
+        for key, value in partial.items():
+            if key not in DEFAULTS:
                 continue
-        elif key == "recents":
-            clean[key] = value if isinstance(value, list) else []
-        elif key == "scope":
-            clean[key] = value if value in ("user", "all") else "user"
-        else:
-            clean[key] = "" if value is None else str(value)
-    settings.update(clean)
-    save_settings(settings)
-    return settings
+            if key in _BOOL_KEYS:
+                clean[key] = bool(value)
+            elif key in _INT_KEYS:
+                try:
+                    clean[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+            elif key == "recents":
+                clean[key] = value if isinstance(value, list) else []
+            elif key == "scope":
+                clean[key] = value if value in ("user", "all") else "user"
+            else:
+                clean[key] = "" if value is None else str(value)
+        settings.update(clean)
+        save_settings(settings)
+        return settings
 
 
 def add_recent(path: str, limit: int = 8) -> None:
-    settings = load_settings()
-    recents = [p for p in settings["recents"] if p != path]
-    recents.insert(0, path)
-    settings["recents"] = recents[:limit]
-    save_settings(settings)
+    with _SETTINGS_LOCK:
+        settings = load_settings()
+        recents = [p for p in settings["recents"] if p != path]
+        recents.insert(0, path)
+        settings["recents"] = recents[:limit]
+        save_settings(settings)

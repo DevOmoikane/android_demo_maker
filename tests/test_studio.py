@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -820,6 +821,42 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(1440, loaded["compose_height"])
         self.assertIsInstance(loaded["compose_height"], int)
         self.assertNotIsInstance(loaded["compose_height"], bool)
+
+    def test_concurrent_updates_do_not_lose_keys(self):
+        # The server is a ThreadingHTTPServer, so two PUTs can interleave: both
+        # read the same file, both write, and the second write discards the
+        # first's changes. Each thread below writes a distinct key, so a lost
+        # update shows up as a key that never made it to disk.
+        with tempfile.TemporaryDirectory() as tmp:
+            orig_file = config.SETTINGS_FILE
+            config.SETTINGS_FILE = Path(tmp) / "settings.json"
+            try:
+                config.update_settings({"serial": "SER1", "app_id": "com.example.app"})
+
+                def write(key, value):
+                    config.update_settings({key: value})
+
+                threads = [threading.Thread(target=write, args=(key, value))
+                           for key, value in (
+                               ("serial_2", "SER2"),
+                               ("app_id_2", "com.other.app"),
+                               ("activity_2", "com.other.app/.MainActivity"),
+                               ("compose_height", 1440),
+                               ("second_device", True),
+                           )]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                loaded = config.load_settings()
+            finally:
+                config.SETTINGS_FILE = orig_file
+        self.assertEqual("SER2", loaded["serial_2"])
+        self.assertEqual("com.other.app", loaded["app_id_2"])
+        self.assertEqual("com.other.app/.MainActivity", loaded["activity_2"])
+        self.assertEqual(1440, loaded["compose_height"])
+        self.assertIs(True, loaded["second_device"])
 
 
 if __name__ == "__main__":
