@@ -46,7 +46,7 @@ ffmpeg + ffprobe for recording only. Spec testing needs just adb and jq.
 | Narration | TTS engine (macOS say / Piper / none), voice picker, rate, audio preview |
 | Steps | tree editor for demo steps JSON and spec scenarios, with validation, recents, and run/dry-run buttons |
 | Spec Tests | pick a scenarios directory and app id, browse/edit every scenario, run one/file/all, watch the live log and the coverage report |
-| Output & Advanced | output folder/name, segment seconds, silent override, script paths |
+| Output & Advanced | output folder/name, segment seconds, composite height (two devices), keep-workdir, silent override, script paths |
 | Run | copyable command preview, live log, cancel, final MP4 path |
 
 Settings persist between sessions. The server binds to 127.0.0.1 under a
@@ -87,9 +87,12 @@ The finished MP4 path appears under the log when the run completes
 
 ## Writing a demo steps file
 
-A steps file is a single JSON array of step objects
-(`example-steps.json` is a working sample). Every step supports three optional
-fields on top of its own:
+A steps file is a single JSON array of step objects. `example-steps.json` is a
+working sample that demonstrates two devices: three of its steps carry
+`"device": 2`, so it needs a second phone or emulator attached to run as
+written. For a single-device run, drop those three steps or turn the second
+device on as [Recording two devices](#recording-two-devices) describes.
+Every step supports three optional fields on top of its own:
 
 | Field | Meaning |
 | --- | --- |
@@ -160,9 +163,9 @@ Two sharp edges, both from the same rule, no inheritance:
 
 ```json
 { "action": "exec", "device": 2,
-  "command": "adb -s emulator-5554 shell getprop ro.serialno" },
+  "command": "adb -s \"$DEMO_SERIAL\" shell getprop ro.serialno" },
 { "action": "if", "device": 2, "source": "last_command",
-  "output_matches": "^emulator-5554$",
+  "output_matches": "^.+$",
   "then": [ { "action": "pause", "device": 2,
               "narration": "That was the second phone." } ] }
 ```
@@ -398,9 +401,10 @@ changes and no second-device flag is passed at all.
 
 Emulators count as candidates for the second device even though the primary
 auto-detect skips them, since recording alongside an emulator is a common
-case. With two or more *other* devices attached and no `--serial-2`, the run
-says so and records device 1 only. Nothing is installed for you: whatever
-apps you name have to be on the device that will run them.
+case. With two or more *other* devices attached and no `--serial-2`, the
+driver says so and stays with device 1: the demo prints "recording device 1
+only", the spec driver "running device 1 only". Nothing is installed for you:
+whatever apps you name have to be on the device that will run them.
 
 **When the two devices run different apps**, `--app-id-2` still defaults to
 `--app-id`, so pass it explicitly, and give the second device its own launch
@@ -427,6 +431,10 @@ raise it for more readable text. A single-device run is never composited and
 ignores `--compose-height`: it passes through at the device's own screen size
 (1080x2400). Either way the run prints what it is about to encode, for
 example `==> Normalizing 3 recording segments to 972x1080`.
+
+The geometry and the ffmpeg filter graph live in `android-compose-lib.sh`, as
+pure functions over each device's screen size, so that is where to look for
+how the composite is built and how to change it.
 
 ## Tips and troubleshooting
 

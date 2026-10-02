@@ -34,7 +34,7 @@ model on request. Re-run the checks any time with `./setup.sh --check`.
 | Narration | engine choice (Piper default / macOS say / none), voice picker with search, rate slider, audio preview, in-app browsing and one-click download of any HuggingFace Piper voice |
 | Steps | full tree editor for demo steps JSON and spec scenarios: add/edit/duplicate/delete/reorder, nested if.then/else branches, schema-driven forms with inline help and narration field, validation with per-step highlighting, run/dry-run buttons, open/save/recents |
 | Spec Tests | scenarios directory and app id, per-file scenario browser with inline validation, edit scenarios in the tree editor, create files/scenarios, run one/file/all, live log, coverage report table |
-| Output & Advanced | output folder and file name, segment seconds, keep-workdir, silent recording override, script path |
+| Output & Advanced | output folder and file name, segment seconds, composite height (two devices), keep-workdir, silent recording override, script path |
 | Run | copyable command preview, live log streaming, cancel button, final MP4 path |
 
 Settings persist between sessions (last device, app, engine, voice,
@@ -51,12 +51,19 @@ field. The second device is opt-in: with the box unticked no second-device
 flag is passed and the primary device behaves exactly as before. See
 [INSTRUCTIONS.md](INSTRUCTIONS.md#recording-two-devices).
 
+The pane geometry and the ffmpeg filter graph live in
+`android-compose-lib.sh`, pure functions over each device's screen size. The
+shipped `example-steps.json` tour is the worked example: its `device: 2` steps
+need a second device attached to run as written, so drop them for a
+single-device run.
+
 ## Layout
 
 ```
 android-demo.sh      the demo driver: narrated screen recording
 android-spec-test.sh the spec-test driver: unattended assertions + coverage
 android-ui-lib.sh    shared adb/uiautomator driving code for both scripts
+android-compose-lib.sh video geometry and ffmpeg filter graph for two-device recordings
 android-spec-tests/  example scenario file (point the Spec Tests tab here
                      or at your own directory)
 setup.sh / run.sh    bootstrap and launcher
@@ -64,7 +71,7 @@ demo_maker/          stdlib-only backend package
 web/                 static frontend (vanilla JS)
 tests/               unittest suite for the backend (python -m unittest discover -s tests)
                      plus tests/run_bash_tests.sh for the shell drivers/ui-lib logic
-example-steps.json   sample tour exercising most actions
+example-steps.json   sample tour exercising most actions, including a second device
 piper-voices/        Piper models used by --tts piper
 ```
 
