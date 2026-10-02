@@ -12,6 +12,7 @@ const State = {
   tools: {},
   darwin: true,
   devices: [],
+  packagesBySerial: {},
   sayVoices: [],
   piperVoices: [],
   piperBinary: null,
@@ -31,6 +32,19 @@ const State = {
   specSchema: null,
   specOrder: [],
   catalog: null,
+};
+
+/* The App tab has two identical device/app slots. Slot 1 is the main device and
+   has always existed; slot 2 appears when "record a second device" is checked.
+   Everything that used to hardcode #app-input and State.packages takes a slot
+   number instead, so the two slots cannot drift apart. */
+const SLOTS = {
+  1: {device: "#device-select", app: "#app-input", sug: "#app-suggestions",
+      filter: "#app-filter", act: "#activity-input", hint: "#apps-hint",
+      appKey: "app_id", actKey: "activity", serialKey: "serial"},
+  2: {device: "#device-select-2", app: "#app-input-2", sug: "#app-suggestions-2",
+      filter: "#app-filter-2", act: "#activity-input-2", hint: "#apps-hint-2",
+      appKey: "app_id_2", actKey: "activity_2", serialKey: "serial_2"},
 };
 
 /* Which document the Steps tree is currently editing:
@@ -99,11 +113,20 @@ function debounce(fn, ms) {
   };
 }
 
+/* A settings PUT is a read-modify-write of the whole file server-side, so two
+   in flight at once can each overwrite the other's key. Chaining them keeps the
+   optimistic assign below and the promise above, and loses nothing. It matters
+   here because one field already saves twice: picking or typing an app id saves
+   it, then resolving the activity saves it again with the activity. */
+let settingsQueue = Promise.resolve();
+
 function saveSettings(partial) {
   Object.assign(State.settings, partial);
   refreshCommandPreviewSoon();
-  return api("/api/settings", {method: "PUT", body: partial})
-    .catch((err) => toast("settings not saved: " + err.message, "error"));
+  const put = settingsQueue.then(() =>
+    api("/api/settings", {method: "PUT", body: partial}));
+  settingsQueue = put.catch(() => {});
+  return put.catch((err) => toast("settings not saved: " + err.message, "error"));
 }
 
 /* ---------------------------------------------------------------- tabs */
@@ -130,6 +153,7 @@ async function boot() {
     State.darwin = state.darwin;
     $("#version-badge").textContent = "v" + state.version;
     bindAppTab();
+    bindCompanionDevice();
     bindNarrationTab(state);
     bindOutputTab();
     bindRunTab();
@@ -176,68 +200,169 @@ function bindAppTab() {
     const serial = $("#device-select").value;
     await saveSettings({serial});
     updateDeviceChip();
-    if (serial) loadPackages();
+    if (serial) loadPackages(1);
   });
   $$('input[name="scope"]').forEach((radio) => {
     radio.checked = radio.value === (State.settings.scope || "user");
     radio.addEventListener("change", () => {
       if (radio.checked) {
         saveSettings({scope: radio.value});
-        loadPackages();
+        loadPackages(1);
       }
     });
   });
-  $("#app-filter").addEventListener("input", debounce(renderAppOptions, 200));
+  $("#app-filter").addEventListener("input", debounce(() => renderAppOptions(1), 200));
   const appInput = $("#app-input");
   appInput.value = State.settings.app_id || "";
   appInput.addEventListener("change", () => {
     saveSettings({app_id: appInput.value.trim()});
     refreshCommandPreviewSoon();
   });
-  appInput.addEventListener("focus", renderAppSuggestions);
-  appInput.addEventListener("input", renderAppSuggestions);
-  appInput.addEventListener("keydown", (event) => {
-    if (!$("#app-suggestions").hidden) {
-      const count = Suggest.items.length;
-      if (event.key === "ArrowDown" && count) {
-        event.preventDefault();
-        Suggest.active = Math.min(Suggest.active + 1, count - 1);
-        highlightSuggestion();
-        return;
-      }
-      if (event.key === "ArrowUp" && count) {
-        event.preventDefault();
-        Suggest.active = Math.max(Suggest.active - 1, 0);
-        highlightSuggestion();
-        return;
-      }
-      if (event.key === "Enter") {
-        if (Suggest.active >= 0) {
-          event.preventDefault();
-          pickApp(Suggest.items[Suggest.active]);
-        }
-        return;  // plain Enter falls through to the change handler
-      }
-      if (event.key === "Escape") {
-        closeAppSuggestions();
-        return;
-      }
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      renderAppSuggestions();
-    }
-  });
+  appInput.addEventListener("focus", () => openAppSuggestions(1));
+  appInput.addEventListener("input", () => renderAppSuggestions(1));
+  bindAppInputKeys(1);
   document.addEventListener("click", (event) => {
-    if (!event.target.closest(".app-input-wrap")) closeAppSuggestions();
+    // One handler for both slots: a click only leaves a dropdown open when it
+    // landed inside that slot's own input wrapper.
+    for (const slot of [1, 2]) {
+      if (!$(SLOTS[slot].sug).parentElement.contains(event.target)) {
+        closeAppSuggestions(slot);
+      }
+    }
   });
   const actInput = $("#activity-input");
   actInput.value = State.settings.activity || "";
   actInput.addEventListener("change", () =>
     saveSettings({activity: actInput.value.trim()}));
-  $("#app-resolve").addEventListener("click", resolveActivity);
+  $("#app-resolve").addEventListener("click", () => resolveActivity(1));
   appInput.addEventListener("change", () => {
-    if (appInput.value.includes(".")) resolveActivity();
+    if (appInput.value.includes(".")) resolveActivity(1);
   });
+}
+
+function bindCompanionDevice() {
+  const toggle = $("#second-device-toggle");
+  toggle.checked = !!State.settings.second_device;
+  const appInput = $("#app-input-2");
+  appInput.value = State.settings.app_id_2 || "";
+  const actInput = $("#activity-input-2");
+  actInput.value = State.settings.activity_2 || "";
+
+  toggle.addEventListener("change", () => {
+    saveSettings({second_device: toggle.checked});
+    applyCompanionDevice();
+    updateDeviceChip();
+  });
+  $("#device-select-2").addEventListener("change", async () => {
+    const serial = $("#device-select-2").value;
+    await saveSettings({serial_2: serial});
+    updateDeviceChip();
+    if (serial) loadPackages(2);
+  });
+  $("#app-filter-2").addEventListener("input", debounce(() => renderAppOptions(2), 200));
+  appInput.addEventListener("change", () => {
+    saveSettings({app_id_2: appInput.value.trim()});
+    refreshCommandPreviewSoon();
+  });
+  appInput.addEventListener("focus", () => openAppSuggestions(2));
+  appInput.addEventListener("input", () => renderAppSuggestions(2));
+  bindAppInputKeys(2);
+  $("#app-resolve-2").addEventListener("click", () => resolveActivity(2));
+  appInput.addEventListener("change", () => {
+    if (appInput.value.includes(".")) resolveActivity(2);
+  });
+  actInput.addEventListener("change", () =>
+    saveSettings({activity_2: actInput.value.trim()}));
+
+  applyCompanionDevice();
+}
+
+/* The keyboard contract of a package field, identical for both slots: arrows
+   walk an open dropdown, Enter takes the highlighted package and a plain Enter
+   falls through to the change handler, Escape dismisses, and ArrowDown on a
+   closed dropdown opens it. Shared so slot 2 cannot drift from slot 1. */
+function bindAppInputKeys(slot) {
+  const box = $(SLOTS[slot].sug);
+  $(SLOTS[slot].app).addEventListener("keydown", (event) => {
+    if (!box.hidden) {
+      const count = Suggest[slot].items.length;
+      if (event.key === "ArrowDown" && count) {
+        event.preventDefault();
+        Suggest[slot].active = Math.min(Suggest[slot].active + 1, count - 1);
+        highlightSuggestion(slot);
+        return;
+      }
+      if (event.key === "ArrowUp" && count) {
+        event.preventDefault();
+        Suggest[slot].active = Math.max(Suggest[slot].active - 1, 0);
+        highlightSuggestion(slot);
+        return;
+      }
+      if (event.key === "Enter") {
+        if (Suggest[slot].active >= 0) {
+          event.preventDefault();
+          pickApp(slot, Suggest[slot].items[Suggest[slot].active]);
+        }
+        return;  // plain Enter falls through to the change handler
+      }
+      if (event.key === "Escape") {
+        closeAppSuggestions(slot);
+        return;
+      }
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      renderAppSuggestions(slot);
+    }
+  });
+}
+
+/* Shows or hides the companion block and refills its picker. loadDevices calls
+   this as well, so the second picker is rebuilt whenever the device list
+   changes rather than only when the box is ticked. */
+function applyCompanionDevice() {
+  const on = $("#second-device-toggle").checked;
+  $("#second-device-block").hidden = !on;
+  if (on) fillCompanionSelect();
+  else closeAppSuggestions(2);
+}
+
+/* Focusing a package field opens its dropdown and closes the other slot's, so
+   tabbing from one device's field to the other's never leaves two lists
+   hanging open over the tab. */
+function openAppSuggestions(slot) {
+  for (const other of [1, 2]) {
+    if (other !== slot) closeAppSuggestions(other);
+  }
+  renderAppSuggestions(slot);
+}
+
+function fillCompanionSelect() {
+  const sel = $("#device-select-2");
+  sel.innerHTML = "";
+  if (!State.devices.length) {
+    sel.append(el("option", {value: "", text: "no devices found"}));
+  }
+  for (const dev of State.devices) {
+    const label = dev.model
+      ? dev.serial + "  (" + dev.model + ", " + dev.state + ")"
+      : dev.serial + "  (" + dev.state + ")";
+    sel.append(el("option", {value: dev.serial, text: label}));
+  }
+  // Never default to the main device's serial: the driver rejects a second
+  // device identical to the first, and the failure would surface at run time.
+  const saved = State.settings.serial_2;
+  const value = (saved && State.devices.some((d) => d.serial === saved))
+    ? saved
+    : (State.devices.find((d) => d.serial !== State.settings.serial) || {}).serial || "";
+  // A select cannot show "nothing chosen" without an option to choose, so say
+  // why it is empty rather than leaving a blank control with no explanation.
+  if (!value && State.devices.length) {
+    sel.append(el("option", {value: "", text: "no other device attached"}));
+  }
+  // The default is deliberately not saved: it is a suggestion, not a choice,
+  // and it is re-derived from the device list on every scan and every reload.
+  sel.value = value;
+  if (value) loadPackages(2);
 }
 
 async function loadDevices() {
@@ -268,20 +393,34 @@ async function loadDevices() {
   } else {
     select.value = State.settings.serial || "";
   }
+  if ($("#second-device-toggle").checked) applyCompanionDevice();
   updateDeviceChip();
-  if (select.value) loadPackages();
+  if (select.value) loadPackages(1);
 }
 
 function updateDeviceChip() {
   const chip = $("#device-chip");
   const serial = State.settings.serial;
   if (serial) {
-    chip.textContent = serial;
+    const second = secondSerial();
+    chip.textContent = (State.settings.second_device && second)
+      ? serial + " + " + second
+      : serial;
     chip.className = "badge ok";
   } else {
     chip.textContent = "no device";
     chip.className = "badge";
   }
+}
+
+/* The second serial the App tab is offering right now. It is the companion
+   picker's own value while that block is showing, because the picker can hold
+   a default the settings do not: the default is only saved once it is chosen,
+   and a settings PUT can lose a race with the backend's own writes. */
+function secondSerial() {
+  const block = $("#second-device-block");
+  if (block && !block.hidden) return $("#device-select-2").value;
+  return State.settings.serial_2 || "";
 }
 
 async function updateDeviceChipQuietly() {
@@ -304,31 +443,34 @@ async function updateDeviceChipQuietly() {
     }
     // studio may have booted before the device was plugged in; recover the
     // package list as soon as it shows up
-    if (online && !(State.packages || []).length) loadPackages();
+    if (online && !packagesFor(1).length) loadPackages(1);
   } catch (e) { /* ignore polling hiccups */ }
 }
 
-async function loadPackages() {
-  const serial = State.settings.serial;
-  const hint = $("#apps-hint");
+async function loadPackages(slot) {
+  const s = SLOTS[slot];
+  const serial = State.settings[s.serialKey];
+  const hint = $(s.hint);
   if (!serial) { hint.textContent = "connect a device first"; return; }
   hint.textContent = "loading packages...";
   try {
     const scope = State.settings.scope || "user";
     const data = await api("/api/apps?serial=" + encodeURIComponent(serial) +
                            "&scope=" + scope);
-    State.packages = (data.packages || []).map((p) => p.package);
-    hint.textContent = State.packages.length + " packages";
-    renderAppOptions();
+    // Keyed by serial rather than by slot, so switching either device keeps the
+    // other slot's list instead of throwing it away.
+    State.packagesBySerial[serial] = (data.packages || []).map((p) => p.package);
+    hint.textContent = State.packagesBySerial[serial].length + " packages";
+    renderAppOptions(slot);
   } catch (err) {
     hint.textContent = err.message;
   }
 }
 
-function renderAppOptions() {
+function renderAppOptions(slot) {
   // Kept as the refresh entry point: re-render the suggestion dropdown if
   // it is currently visible (e.g. after the package list or filter changes).
-  if (!$("#app-suggestions").hidden) renderAppSuggestions();
+  if (!$(SLOTS[slot].sug).hidden) renderAppSuggestions(slot);
 }
 
 /* Custom package suggestions. The native datalist was dropped because
@@ -336,82 +478,88 @@ function renderAppOptions() {
    chosen id left an empty-looking dropdown). This one filters by what is
    typed but falls back to the full filtered list so there is always
    something to pick from. */
-const Suggest = {items: [], active: -1};
+const Suggest = {1: {items: [], active: -1}, 2: {items: [], active: -1}};
 
-function filteredPackages() {
-  const needle = ($("#app-filter").value || "").trim().toLowerCase();
-  const pool = State.packages || [];
+function packagesFor(slot) {
+  const serial = State.settings[SLOTS[slot].serialKey];
+  return State.packagesBySerial[serial] || [];
+}
+
+function filteredPackages(slot) {
+  const needle = ($(SLOTS[slot].filter).value || "").trim().toLowerCase();
+  const pool = packagesFor(slot);
   return needle
     ? pool.filter((p) => p.toLowerCase().includes(needle))
     : pool.slice();
 }
 
-function renderAppSuggestions() {
-  const box = $("#app-suggestions");
-  const typed = $("#app-input").value.trim().toLowerCase();
-  let items = filteredPackages();
+function renderAppSuggestions(slot) {
+  const box = $(SLOTS[slot].sug);
+  const typed = ($(SLOTS[slot].app).value || "").trim().toLowerCase();
+  let items = filteredPackages(slot);
   if (typed) {
     const matches = items.filter((p) => p.toLowerCase().includes(typed));
-    items = matches.length ? matches : filteredPackages();
+    items = matches.length ? matches : filteredPackages(slot);
   }
-  Suggest.items = items.slice(0, 300);
-  Suggest.active = -1;
+  Suggest[slot] = {items: items.slice(0, 300), active: -1};
   box.innerHTML = "";
-  if (!(State.packages || []).length) {
+  if (!packagesFor(slot).length) {
     box.append(el("li", {class: "hint", text: "no packages loaded yet"}));
     box.hidden = false;
     return;
   }
-  for (const pkg of Suggest.items) {
+  for (const pkg of Suggest[slot].items) {
     box.append(el("li", {text: pkg,
                          onmousedown: (event) => {
                            event.preventDefault();  // keep input focus
-                           pickApp(pkg);
+                           pickApp(slot, pkg);
                          }}));
   }
-  if (!Suggest.items.length) {
+  if (!Suggest[slot].items.length) {
     box.append(el("li", {class: "hint", text: "no installed package matches"}));
   }
   box.hidden = false;
 }
 
-function highlightSuggestion() {
-  const lis = $$("#app-suggestions li:not(.hint)");
-  lis.forEach((li, i) => li.classList.toggle("active", i === Suggest.active));
-  if (lis[Suggest.active] && lis[Suggest.active].scrollIntoView) {
-    lis[Suggest.active].scrollIntoView({block: "nearest"});
+function highlightSuggestion(slot) {
+  const lis = $$(SLOTS[slot].sug + " li:not(.hint)");
+  const active = Suggest[slot].active;
+  lis.forEach((li, i) => li.classList.toggle("active", i === active));
+  if (lis[active] && lis[active].scrollIntoView) {
+    lis[active].scrollIntoView({block: "nearest"});
   }
 }
 
-function closeAppSuggestions() {
-  $("#app-suggestions").hidden = true;
-  Suggest.items = [];
-  Suggest.active = -1;
+function closeAppSuggestions(slot) {
+  $(SLOTS[slot].sug).hidden = true;
+  Suggest[slot] = {items: [], active: -1};
 }
 
-function pickApp(pkg) {
-  $("#app-input").value = pkg;
-  closeAppSuggestions();
-  saveSettings({app_id: pkg});
-  resolveActivity();
+function pickApp(slot, pkg) {
+  const s = SLOTS[slot];
+  $(s.app).value = pkg;
+  closeAppSuggestions(slot);
+  saveSettings({[s.appKey]: pkg});
+  resolveActivity(slot);
 }
 
-async function resolveActivity() {
-  const serial = State.settings.serial;
-  const pkg = $("#app-input").value.trim();
+async function resolveActivity(slot) {
+  const s = SLOTS[slot];
+  const serial = State.settings[s.serialKey];
+  const pkg = $(s.app).value.trim();
   if (!serial || !pkg) return;
-  $("#activity-input").placeholder = "resolving...";
+  $(s.act).placeholder = "resolving...";
   try {
     const data = await api("/api/activity", {
       method: "POST",
       body: {serial, package: pkg},
     });
-    $("#activity-input").value = data.activity;
-    $("#activity-input").placeholder = "launch activity (auto)";
-    saveSettings({app_id: pkg, activity: data.activity});
+    $(s.act).value = data.activity;
+    $(s.act).placeholder = "launch activity (auto)";
+    saveSettings({[s.appKey]: pkg, [s.actKey]: data.activity});
     toast("resolved: " + data.activity, "ok");
   } catch (err) {
-    $("#activity-input").placeholder = "launch activity (auto)";
+    $(s.act).placeholder = "launch activity (auto)";
     toast("could not resolve activity: " + err.message, "error");
   }
 }
@@ -1342,6 +1490,8 @@ function bindOutputTab() {
     saveSettings({out_name: $("#out-name").value.trim()}));
   $("#segment-seconds").addEventListener("change", () =>
     saveSettings({segment_seconds: Number($("#segment-seconds").value) || 150}));
+  $("#compose-height").addEventListener("change", () =>
+    saveSettings({compose_height: Number($("#compose-height").value) || 1080}));
   $("#keep-workdir").addEventListener("change", () =>
     saveSettings({keep_workdir: $("#keep-workdir").checked}));
   $("#no-narration-force").addEventListener("change", () =>
@@ -1354,6 +1504,7 @@ function fillOutputTab() {
   $("#out-dir").value = State.settings.out_dir || "";
   $("#out-name").value = State.settings.out_name || "";
   $("#segment-seconds").value = State.settings.segment_seconds || 150;
+  $("#compose-height").value = State.settings.compose_height || 1080;
   $("#keep-workdir").checked = !!State.settings.keep_workdir;
   $("#no-narration-force").checked = !!State.settings.no_narration;
   $("#script-path").value = State.settings.script_path || "";
@@ -1388,10 +1539,16 @@ function effectiveSettings() {
     app_id: $("#app-input") ? $("#app-input").value.trim()
                             : State.settings.app_id,
     activity: $("#activity-input") ? $("#activity-input").value.trim() : "",
+    second_device: $("#second-device-toggle")
+      ? $("#second-device-toggle").checked : !!State.settings.second_device,
+    serial_2: $("#device-select-2") ? $("#device-select-2").value : "",
+    app_id_2: $("#app-input-2") ? $("#app-input-2").value.trim() : "",
+    activity_2: $("#activity-input-2") ? $("#activity-input-2").value.trim() : "",
     steps_path: currentStepsPath(),
     out_dir: $("#out-dir").value,
     out_name: $("#out-name").value,
     segment_seconds: Number($("#segment-seconds").value) || 150,
+    compose_height: Number($("#compose-height").value) || 1080,
     engine: State.settings.engine,
     voice: $("#voice-select") ? $("#voice-select").value : "",
     rate: $("#rate-input") ? $("#rate-input").value : "",
@@ -1792,6 +1949,11 @@ async function runSpec(extra) {
   const body = Object.assign({
     settings: {
       serial: State.settings.serial,
+      second_device: $("#second-device-toggle")
+        ? $("#second-device-toggle").checked : !!State.settings.second_device,
+      serial_2: $("#device-select-2") ? $("#device-select-2").value : "",
+      app_id_2: $("#app-input-2") ? $("#app-input-2").value.trim() : "",
+      activity_2: $("#activity-input-2") ? $("#activity-input-2").value.trim() : "",
       spec_app_id: $("#spec-app-id").value.trim(),
       spec_activity: $("#spec-activity").value.trim(),
     },

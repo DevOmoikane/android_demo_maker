@@ -37,6 +37,9 @@
       <select id="device-select"></select>
       <button id="device-refresh" class="ghost">Refresh</button>
     </div>
+    <div class="row">
+      <label class="inline"><input type="checkbox" id="second-device-toggle"> record a second device side by side</label>
+    </div>
     <p class="hint" id="adb-hint"></p>
   </div>
 
@@ -59,6 +62,29 @@
       <input id="activity-input" placeholder="launch activity (auto)">
     </div>
     <p class="hint" id="apps-hint"></p>
+  </div>
+
+  <div class="card" id="second-device-block" hidden>
+    <h2>Second device</h2>
+    <div class="row">
+      <select id="device-select-2"></select>
+      <span class="hint">appears on the right of the recording</span>
+    </div>
+    <div class="row">
+      <input id="app-filter-2" type="search" placeholder="filter package list (clear to see all)">
+    </div>
+    <div class="row">
+      <div class="app-input-wrap">
+        <input id="app-input-2" placeholder="com.example.app (defaults to the main app)"
+               autocomplete="off" spellcheck="false">
+        <ul id="app-suggestions-2" class="suggest" hidden></ul>
+      </div>
+      <button id="app-resolve-2" class="ghost">Resolve activity</button>
+    </div>
+    <div class="row">
+      <input id="activity-input-2" placeholder="launch activity (auto)">
+    </div>
+    <p class="hint" id="apps-hint-2"></p>
   </div>
 </section>
 
@@ -203,6 +229,9 @@
     <div class="row">
       <label class="inline">segment seconds
         <input id="segment-seconds" type="number" min="10" max="600" step="10">
+      </label>
+      <label class="inline">composite height (two devices)
+        <input id="compose-height" type="number" min="240" step="20" value="1080">
       </label>
     </div>
     <div class="row">

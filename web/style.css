@@ -88,9 +88,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 textarea { width: 100%; min-height: 90px; resize: vertical; font-family: inherit; }
 
 #voice-select { width: 100%; }
-#device-select { min-width: 260px; }
+#device-select, #device-select-2 { min-width: 260px; }
 #app-input, #activity-input, #out-dir, #script-path, #piper-model-path,
 #piper-bin, #picker-manual { flex: 1; min-width: 240px; }
+#app-input-2, #activity-input-2 { flex: 1; min-width: 240px; }
 
 button {
   appearance: none; border: 1px solid var(--line); border-radius: 7px;
