@@ -1039,11 +1039,9 @@ expect_contains "and the run names the composite size" "$DRIVE_OUT" \
   "==> Normalizing 1 recording segment to 972x1080"
 
 # Multi-segment order is pinned where it can be, which is the library. The driver
-# cannot cut a second segment in this suite because LEAVES_LEFT is 0 rather than
-# TOTAL_LEAVES, a defect that predates this task, so a two-segment run is not
-# reachable from here. Instead the driver is required to take its order from
-# compose_input_order and to have no loop of its own, and the multi-segment order
-# is asserted against the library, which is what the driver consumes verbatim.
+# takes its order from compose_input_order and has no loop of its own, so the
+# multi-segment order is asserted against the library, which is what the driver
+# consumes verbatim.
 expect_grep "phase 4 takes its input order from the library" "$DEMO" \
   'done < <(compose_input_order "$SEG_COUNT")'
 expect_no_grep "and builds no input loop of its own" "$DEMO" \
@@ -1380,6 +1378,21 @@ expect "and the one step before it still ran" \
   "$(count_calls "$DRIVE_CALLS" 'shell input keyevent KEYCODE_BACK')" "2"
 expect "nothing was asked of a device with no serial" \
   "$(serials_touched "$DRIVE_CALLS")" "$SERIAL_A,"
+
+# The segment cut. LEAVES_LEFT is seeded from TOTAL_LEAVES, so a run that passes
+# --segment-seconds cuts instead of letting screenrecord hit its own ~180s cap.
+# Before the fix LEAVES_LEFT was 0 and only ever decremented, so the guard was
+# never true, --segment-seconds was inert, and any demo longer than about three
+# minutes was at risk of being truncated on device.
+CUT_STEPS="$(mktemp)"
+printf '[{"action":"back","settle_ms":300},{"action":"dismiss_keyboard","settle_ms":300},{"action":"home_button","settle_ms":300}]\n' > "$CUT_STEPS"
+drive 'SER1  device usb:1-1' "$DEMO" --serial SER1 --no-narration \
+  --segment-seconds 0.01 --steps "$CUT_STEPS" \
+  --out "$LAUNCH_SCENARIOS.mp4" --keep-workdir
+expect "a run past --segment-seconds cuts a segment" \
+  "$(count_calls "$DRIVE_CALLS" 'shell screenrecord --bit-rate')" "3"
+expect_contains "and says so in the log" "$DRIVE_OUT" "cutting recording segment"
+rm -f "$CUT_STEPS"
 
 # ---------------------------------------------------------------- summary
 echo

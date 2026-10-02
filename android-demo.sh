@@ -769,8 +769,16 @@ walk_and_synthesize() {
 }
 echo "==> Synthesizing narration audio"
 TOTAL_LEAVES=0
-LEAVES_LEFT=0
 walk_and_synthesize "$(cat "$STEPS_FILE")" ""
+# Seeded from the walk's count, not left at 0. The cut guard tests LEAVES_LEFT > 0
+# and the counter only ever decrements, so a start value of 0 made it never
+# positive: the segment cut never fired, --segment-seconds was inert, and any
+# demo long enough to matter was left to screenrecord's own ~180s cap.
+# TOTAL_LEAVES counts both arms of every if step, so it overcounts the beats that
+# will actually run. That is the safe direction: the worst it does is cut a beat
+# early and leave a short final segment, where undercounting would let a segment
+# run past the cap and be truncated on device.
+LEAVES_LEFT="$TOTAL_LEAVES"
 echo "==> ${TOTAL_LEAVES} timed beats (leaf steps + condition checks, all branches)"
 
 # ---- Phase 2: drive the device + record the screen, segmented -------------
