@@ -9,9 +9,25 @@
     "narration": "We start from a clean install of the app."
   },
   {
+    "action": "launch",
+    "device": 2,
+    "settle_ms": 2500,
+    "narration": "The second phone comes up on the same screen."
+  },
+  {
     "action": "tap_contains",
     "text": "Get started",
     "narration": "Signing up takes just a couple of fields."
+  },
+  {
+    "action": "tap_contains",
+    "text": "Settings",
+    "device": 2,
+    "narration": "On the second phone, a tap opens Settings in its own copy of the app."
+  },
+  {
+    "action": "back",
+    "device": 2
   },
   {
     "action": "tap_text",

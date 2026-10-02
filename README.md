@@ -30,7 +30,7 @@ model on request. Re-run the checks any time with `./setup.sh --check`.
 
 | Tab | What it does |
 | --- | --- |
-| App | pick a connected device, list installed packages (user or all), auto-resolve the launch activity |
+| App | pick a connected device, optionally add a second phone or emulator to record side by side, list installed packages (user or all), auto-resolve the launch activity |
 | Narration | engine choice (Piper default / macOS say / none), voice picker with search, rate slider, audio preview, in-app browsing and one-click download of any HuggingFace Piper voice |
 | Steps | full tree editor for demo steps JSON and spec scenarios: add/edit/duplicate/delete/reorder, nested if.then/else branches, schema-driven forms with inline help and narration field, validation with per-step highlighting, run/dry-run buttons, open/save/recents |
 | Spec Tests | scenarios directory and app id, per-file scenario browser with inline validation, edit scenarios in the tree editor, create files/scenarios, run one/file/all, live log, coverage report table |
@@ -39,6 +39,17 @@ model on request. Re-run the checks any time with `./setup.sh --check`.
 
 Settings persist between sessions (last device, app, engine, voice,
 folders, recent steps files).
+
+## Two devices at once
+
+For apps that need a companion handset (a chat delivered to another phone, a
+confirmation on a second device, an authenticator app), tick **record a
+second device side by side** in the App tab and pick a second phone or
+emulator. Both are recorded through the same timeline and composited side by
+side into one MP4, and each step chooses its device with a `"device": 2`
+field. The second device is opt-in: with the box unticked no second-device
+flag is passed and the primary device behaves exactly as before. See
+[INSTRUCTIONS.md](INSTRUCTIONS.md#recording-two-devices).
 
 ## Layout
 

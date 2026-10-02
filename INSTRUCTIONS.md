@@ -42,7 +42,7 @@ ffmpeg + ffprobe for recording only. Spec testing needs just adb and jq.
 
 | Tab | Purpose |
 | --- | --- |
-| App | pick a connected device, browse installed packages, auto-resolve the launch activity |
+| App | pick a connected device, optionally add a second device to record side by side, browse installed packages, auto-resolve the launch activity |
 | Narration | TTS engine (macOS say / Piper / none), voice picker, rate, audio preview |
 | Steps | tree editor for demo steps JSON and spec scenarios, with validation, recents, and run/dry-run buttons |
 | Spec Tests | pick a scenarios directory and app id, browse/edit every scenario, run one/file/all, watch the live log and the coverage report |
@@ -88,13 +88,14 @@ The finished MP4 path appears under the log when the run completes
 ## Writing a demo steps file
 
 A steps file is a single JSON array of step objects
-(`example-steps.json` is a working sample). Every step supports two optional
+(`example-steps.json` is a working sample). Every step supports three optional
 fields on top of its own:
 
 | Field | Meaning |
 | --- | --- |
 | `narration` | text spoken over this step; the dwell time matches speech length |
 | `settle_ms` | extra wait after the action before narration starts (default 600) |
+| `device` | `1` or `2`, the device this step runs on (default 1); see [Choosing the device](#choosing-the-device) |
 
 ```json
 [
@@ -126,6 +127,51 @@ and exports `DEMO_SERIAL`, `DEMO_APP_ID`, `DEMO_ACTIVITY`,
 (`source: last_command`, checks like `output_matches`) or on live screen text
 (`source: screen` with `text`, `equals`, `matches`, `timeout_seconds`),
 running `then` and/or `else` sub-lists that can nest more ifs.
+
+### Choosing the device
+
+Every step takes an optional `device` field, `1` or `2`. It names which phone
+or emulator the step runs on. Omitting it means device 1, and it never
+inherits from an earlier step, so a step reads the same wherever it sits in
+the file. Scenario steps take the same field, so one assertion file can drive
+both phones.
+
+```json
+{ "action": "tap_text", "text": "Chats" },
+{ "action": "tap_text", "text": "Chats", "device": 2,
+  "narration": "The second phone opens the same conversation." }
+```
+
+On a `device: 2` step, `launch`, `reopen` and `pm_clear` act on the second
+device's app, and every tap, swipe, type and assertion reads and writes that
+device's screen. Narration is unchanged: one voiceover over the composite.
+`exec` steps still run on this machine; the device they are aimed at is what
+`DEMO_SERIAL`, `DEMO_APP_ID` and the rest report.
+
+Two sharp edges, both from the same rule, no inheritance:
+
+- Each device keeps its own last `exec` result, so an `if` step that reads
+  `last_command` must carry the same `device` as the `exec` step it follows.
+  An `if` without `device` reads device 1's slot and will see a stale or empty
+  value.
+- The steps inside `then` / `else` are steps like any other, so they need
+  their own `device` too. They run on device 1 unless they say otherwise, even
+  when the `if` around them is a `device: 2` step.
+
+```json
+{ "action": "exec", "device": 2,
+  "command": "adb -s emulator-5554 shell getprop ro.serialno" },
+{ "action": "if", "device": 2, "source": "last_command",
+  "output_matches": "^emulator-5554$",
+  "then": [ { "action": "pause", "device": 2,
+              "narration": "That was the second phone." } ] }
+```
+
+A step naming device 2 in a single-device run fails before it touches adb,
+with a message telling you to attach the second device (see
+[Recording two devices](#recording-two-devices)). The studio knows how many
+devices its current settings have, so **Validate** flags the step there and
+now instead of leaving it to stop the run partway through the recording.
 
 ## Feature 2: run spec tests
 
@@ -332,6 +378,55 @@ takes a file or directory, `--only NAME` filters to one scenario, and
 Environment: both scripts load `.env` from beside the input file/directory
 and beside the script itself. Exec steps receive `DEMO_*` variables, and
 scenario authors can call any host tool via `exec`.
+
+### Recording two devices
+
+Both drivers take a second device. `android-demo.sh` records both through the
+same beat timeline and composites them side by side into one MP4;
+`android-spec-test.sh` drives both without recording anything. In the studio
+the second device is opt-in: tick **record a second device side by side** in
+the App tab and a *Second device* card appears with its own device picker,
+package field and activity field. Unticked, nothing about the primary device
+changes and no second-device flag is passed at all.
+
+| Flag | Meaning |
+| --- | --- |
+| `--serial-2 <serial>` | the second device. Without it, a single other attached device is adopted |
+| `--app-id-2 <package>` | its app. Defaults to `--app-id`, so the same app on two phones needs only `--serial-2` |
+| `--activity-2 <activity>` | its launch activity. Unset, it is resolved from that device's own package manager for `--app-id-2` |
+| `--compose-height <n>` | demo only. Pane height for the composite, default 1080 |
+
+Emulators count as candidates for the second device even though the primary
+auto-detect skips them, since recording alongside an emulator is a common
+case. With two or more *other* devices attached and no `--serial-2`, the run
+says so and records device 1 only. Nothing is installed for you: whatever
+apps you name have to be on the device that will run them.
+
+**When the two devices run different apps**, `--app-id-2` still defaults to
+`--app-id`, so pass it explicitly, and give the second device its own launch
+component:
+
+- On the command line, an unset `--activity-2` is resolved from the second
+  device's package manager for `--app-id-2`, which is right, so two apps need
+  no extra flag.
+- In the studio, an empty second activity field sends the **primary's**
+  activity as `--activity-2` (demo and spec runs alike), because that is the
+  fallback that makes the same-app case need nothing. An explicit override
+  wins over the package manager, so with two different apps the second phone
+  gets started on the primary's component: it fails where that app is not
+  installed, and launches the wrong app where it is. Fill in the second
+  device's activity field, or hit **Resolve activity** on it, whenever the two
+  apps differ.
+
+Two portrait phones side by side give a near-square frame: `hstack` needs both
+panes at the same height, and a portrait screen is about 0.45 as wide as it is
+tall, so two of them come to 972x1080 at the default pane height. That shape
+comes from the devices, not the flag: `--compose-height` sets the resolution
+(540 gives 488x540, 1440 gives 1296x1440), so lower it for a smaller file and
+raise it for more readable text. A single-device run is never composited and
+ignores `--compose-height`: it passes through at the device's own screen size
+(1080x2400). Either way the run prints what it is about to encode, for
+example `==> Normalizing 3 recording segments to 972x1080`.
 
 ## Tips and troubleshooting
 
