@@ -172,10 +172,11 @@ _INT_RE = re.compile(r"^-?\d+$")
 _DEVICE_FIELD = _f("device", "select", False, None,
                    options=["1", "2"],
                    help_text="which device this step runs on; 1 is the main "
-                             "phone, 2 the second phone or emulator. An if "
-                             "step reading last_command must name the same "
-                             "device as the exec step it follows, since each "
-                             "device keeps its own exec output.")
+                             "phone, 2 the second phone or emulator. Leaving "
+                             "it out means device 1. An if step reading "
+                             "last_command must name the same device as the "
+                             "exec step it follows, since each device keeps "
+                             "its own exec output.")
 
 # Narration applies to every action; attach it once here so the editor forms
 # always offer it (the spec registry strips the narration field, since spec

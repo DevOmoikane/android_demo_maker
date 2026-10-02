@@ -117,16 +117,36 @@ function debounce(fn, ms) {
    in flight at once can each overwrite the other's key. Chaining them keeps the
    optimistic assign below and the promise above, and loses nothing. It matters
    here because one field already saves twice: picking or typing an app id saves
-   it, then resolving the activity saves it again with the activity. */
+   it, then resolving the activity saves it again with the activity.
+
+   The chain is bounded so one request the backend never answers cannot stall
+   every save after it: the queue moves on when the request is given up on, and
+   the save that was queued behind it goes out. */
+const SETTINGS_PUT_TIMEOUT = 10000;
 let settingsQueue = Promise.resolve();
 
 function saveSettings(partial) {
   Object.assign(State.settings, partial);
   refreshCommandPreviewSoon();
-  const put = settingsQueue.then(() =>
-    api("/api/settings", {method: "PUT", body: partial}));
+  const put = settingsQueue.then(() => settingsPut(partial));
   settingsQueue = put.catch(() => {});
   return put.catch((err) => toast("settings not saved: " + err.message, "error"));
+}
+
+function settingsPut(partial) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SETTINGS_PUT_TIMEOUT);
+  return api("/api/settings", {method: "PUT", body: partial,
+                               signal: controller.signal})
+    .catch((err) => {
+      // abort() takes a reason only in newer browsers, so name the timeout here
+      // rather than showing whatever the fetch happened to reject with
+      if (controller.signal.aborted) {
+        throw new Error("the studio backend did not answer");
+      }
+      throw err;
+    })
+    .finally(() => clearTimeout(timer));
 }
 
 /* ---------------------------------------------------------------- tabs */
@@ -199,6 +219,9 @@ function bindAppTab() {
   $("#device-select").addEventListener("change", async () => {
     const serial = $("#device-select").value;
     await saveSettings({serial});
+    // re-derive the companion picker: the device just made the main one must
+    // not stay sitting in the second slot
+    if (State.settings.second_device) applyCompanionDevice();
     updateDeviceChip();
     if (serial) loadPackages(1);
   });
@@ -207,7 +230,9 @@ function bindAppTab() {
     radio.addEventListener("change", () => {
       if (radio.checked) {
         saveSettings({scope: radio.value});
+        // scope filters both package lists, so both hints have to follow it
         loadPackages(1);
+        if (State.settings.second_device) loadPackages(2);
       }
     });
   });
@@ -336,6 +361,16 @@ function openAppSuggestions(slot) {
   renderAppSuggestions(slot);
 }
 
+/* The serial a slot is pointed at. The picker is the source of truth, because
+   it can hold a derived default the settings do not: fillCompanionSelect
+   suggests a second device without saving it, so before the user picks one,
+   settings.serial_2 is still empty and anything reading only the settings would
+   say "no device" about a picker visibly showing one. */
+function serialForSlot(slot) {
+  const sel = $(SLOTS[slot].device);
+  return (sel && sel.value) || State.settings[SLOTS[slot].serialKey] || "";
+}
+
 function fillCompanionSelect() {
   const sel = $("#device-select-2");
   sel.innerHTML = "";
@@ -349,7 +384,8 @@ function fillCompanionSelect() {
     sel.append(el("option", {value: dev.serial, text: label}));
   }
   // Never default to the main device's serial: the driver rejects a second
-  // device identical to the first, and the failure would surface at run time.
+  // device identical to the first, and the argv builder's own check turns that
+  // into the Run tab's preview error instead of a recording that fails.
   const saved = State.settings.serial_2;
   const value = (saved && State.devices.some((d) => d.serial === saved))
     ? saved
@@ -361,6 +397,8 @@ function fillCompanionSelect() {
   }
   // The default is deliberately not saved: it is a suggestion, not a choice,
   // and it is re-derived from the device list on every scan and every reload.
+  // serialForSlot reads it from here, so nothing waits on a write the server's
+  // unsynchronized settings update could drop anyway.
   sel.value = value;
   if (value) loadPackages(2);
 }
@@ -372,7 +410,8 @@ async function loadDevices() {
     State.devices = data.devices || [];
   } catch (err) {
     State.devices = [];
-    $("#apps-hint").textContent = err.message;
+    // both slots, or the second keeps quoting a count from the last good scan
+    for (const slot of [1, 2]) $(SLOTS[slot].hint).textContent = err.message;
   }
   select.innerHTML = "";
   if (!State.devices.length) {
@@ -402,25 +441,13 @@ function updateDeviceChip() {
   const chip = $("#device-chip");
   const serial = State.settings.serial;
   if (serial) {
-    const second = secondSerial();
-    chip.textContent = (State.settings.second_device && second)
-      ? serial + " + " + second
-      : serial;
+    const second = State.settings.second_device ? serialForSlot(2) : "";
+    chip.textContent = second ? serial + " + " + second : serial;
     chip.className = "badge ok";
   } else {
     chip.textContent = "no device";
     chip.className = "badge";
   }
-}
-
-/* The second serial the App tab is offering right now. It is the companion
-   picker's own value while that block is showing, because the picker can hold
-   a default the settings do not: the default is only saved once it is chosen,
-   and a settings PUT can lose a race with the backend's own writes. */
-function secondSerial() {
-  const block = $("#second-device-block");
-  if (block && !block.hidden) return $("#device-select-2").value;
-  return State.settings.serial_2 || "";
 }
 
 async function updateDeviceChipQuietly() {
@@ -449,7 +476,7 @@ async function updateDeviceChipQuietly() {
 
 async function loadPackages(slot) {
   const s = SLOTS[slot];
-  const serial = State.settings[s.serialKey];
+  const serial = serialForSlot(slot);
   const hint = $(s.hint);
   if (!serial) { hint.textContent = "connect a device first"; return; }
   hint.textContent = "loading packages...";
@@ -481,8 +508,7 @@ function renderAppOptions(slot) {
 const Suggest = {1: {items: [], active: -1}, 2: {items: [], active: -1}};
 
 function packagesFor(slot) {
-  const serial = State.settings[SLOTS[slot].serialKey];
-  return State.packagesBySerial[serial] || [];
+  return State.packagesBySerial[serialForSlot(slot)] || [];
 }
 
 function filteredPackages(slot) {
@@ -545,7 +571,7 @@ function pickApp(slot, pkg) {
 
 async function resolveActivity(slot) {
   const s = SLOTS[slot];
-  const serial = State.settings[s.serialKey];
+  const serial = serialForSlot(slot);
   const pkg = $(s.app).value.trim();
   if (!serial || !pkg) return;
   $(s.act).placeholder = "resolving...";
