@@ -274,15 +274,20 @@ def build_spec_argv(settings: dict, target: Optional[str] = None,
     if activity:
         argv += ["--activity", activity]
     if settings.get("second_device"):
-        # --app-id-2 and --activity-2 fall back to the primary, as in
-        # runner.build_argv. No --compose-height here: spec runs record
-        # nothing, so there is no composite to size.
+        # --app-id-2 falls back to the primary, as in runner.build_argv. No
+        # --compose-height here: spec runs record nothing, so there is no
+        # composite to size.
+        app_id_2 = str(settings.get("app_id_2") or "").strip() or app_id
         argv += ["--serial-2", str(settings.get("serial_2") or "").strip(),
-                 "--app-id-2",
-                 str(settings.get("app_id_2") or "").strip() or app_id]
-        activity_2 = str(settings.get("activity_2") or "").strip() or activity
-        if activity_2:
-            argv += ["--activity-2", activity_2]
+                 "--app-id-2", app_id_2]
+        activity_2 = str(settings.get("activity_2") or "").strip()
+        # An empty --activity-2 falls back to the primary's activity only when
+        # the second device runs the same app. With a different app and no
+        # explicit activity, the driver resolves from the second device's own
+        # package manager; sending the primary's component as an explicit
+        # override would win over that and launch the wrong activity.
+        if activity_2 or app_id_2 == app_id:
+            argv += ["--activity-2", activity_2 or activity]
     if only:
         argv += ["--only", only]
     if report_path:

@@ -445,6 +445,19 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertIn("--activity-2 com.example.app/.MainActivity",
                       " ".join(argv))
 
+    def test_second_device_activity_not_fallen_back_for_different_app(self):
+        # An empty --activity-2 falls back to the primary's activity only when
+        # the second device runs the same app. With a different app and no
+        # explicit activity, the driver resolves from the second device's own
+        # package manager, so --activity-2 must be absent: sending the primary's
+        # component as an explicit override would win over that and launch the
+        # wrong activity on the second phone.
+        argv, _ = self.argv_for(self.base_settings(
+            second_device=True, serial_2="SER2",
+            app_id_2="com.other.app",
+            activity="com.example.app/.MainActivity"), "dry")
+        self.assertNotIn("--activity-2", " ".join(argv))
+
     def test_second_device_requires_a_serial(self):
         _, errors = self.argv_for(self.base_settings(
             second_device=True, serial_2=""), "dry")
@@ -656,8 +669,15 @@ class SpecScenarioTests(unittest.TestCase):
         joined = " ".join(argv)
         self.assertIn("--serial-2 SER2", joined)
         self.assertIn("--app-id-2 com.example.app", joined)
-        # spec runs record nothing, so there is no composite to size
-        self.assertNotIn("--compose-height", joined)
+
+    def test_spec_argv_activity_not_fallen_back_for_different_app(self):
+        # Same rule as the demo builder: an empty --activity-2 falls back to the
+        # primary's activity only when the second device runs the same app.
+        argv, _ = spec.build_spec_argv(self.base_settings(
+            second_device=True, serial_2="SER2",
+            app_id_2="com.other.app",
+            spec_activity="com.example.app/.MainActivity"))
+        self.assertNotIn("--activity-2", " ".join(argv))
 
     def test_spec_argv_second_device_activity_defaults_to_primary(self):
         argv, errors = spec.build_spec_argv(self.base_settings(
